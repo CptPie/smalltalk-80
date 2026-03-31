@@ -1,5 +1,6 @@
 use std::fmt;
 
+#[derive(Debug, PartialEq)]
 pub enum ObjectMemoryError {
     InvalidSmallIntegerAccess,
     NotInteger,

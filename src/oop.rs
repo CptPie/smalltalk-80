@@ -73,7 +73,7 @@ impl OOP {
     ///   ↑valueWord <= -16384 and: [valueWord > 16834]
     ///
     pub fn is_integer_value(value: i16) -> bool {
-        return value >= -16384 && value < 16383;
+        return value >= -16384 && value < 16384;
     }
 
     /// Converts a integer value to an OOP object
@@ -94,5 +94,106 @@ impl OOP {
         } else {
             return Err(ObjectMemoryError::NotInIntegerRange);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_raw_creates_oop() {
+        let val = 0x02; // 0x02 is the NilPointer 'constant'
+        let oop = OOP::from_raw(val);
+        assert!(!oop.is_integer_object()); // should be an object
+        assert_eq!(oop.cant_be_integer_object(), Ok(val));
+        assert!(!oop.cant_be_integer_object().is_err());
+    }
+
+    #[test]
+    fn is_integer_object_truthy() {
+        let val = 0x3; // SmallInteger of value '1'
+        let oop = OOP::from_raw(val);
+        assert!(oop.is_integer_object());
+        assert_eq!(oop.integer_value_of(), Ok(0x01));
+    }
+
+    #[test]
+    fn is_integer_object_falsy() {
+        let val = 0x4; // An object value 
+        let oop = OOP::from_raw(val);
+        assert!(!oop.is_integer_object());
+    }
+
+    #[test]
+    fn cant_be_integer_object_errors_on_integer() {
+        let val = 0x3; // SmallInteger of value '1'
+        let oop = OOP::from_raw(val);
+        assert!(oop.cant_be_integer_object().is_err());
+    }
+
+    #[test]
+    fn cant_be_integer_object_returns_value_on_object() {
+        let val = 0x4;
+        let oop = OOP::from_raw(val);
+        assert_eq!(oop.cant_be_integer_object(), Ok(val));
+    }
+
+    #[test]
+    fn integer_value_of_returns_integer() {
+        let val = 0x3;
+        let oop = OOP::from_raw(val);
+        assert_eq!(oop.integer_value_of(), Ok(0x01));
+    }
+
+    #[test]
+    fn integer_value_of_returns_error() {
+        let val = 0x02;
+        let oop = OOP::from_raw(val);
+        assert!(oop.integer_value_of().is_err());
+    }
+
+    #[test]
+    fn is_integer_value_truthy() {
+        // some values within the range
+        let val1 = 12345;
+        assert!(OOP::is_integer_value(val1));
+        let val2 = -12345;
+        assert!(OOP::is_integer_value(val2));
+        // zero
+        let val3 = 0;
+        assert!(OOP::is_integer_value(val3));
+        // lower bound
+        let val4 = -16384;
+        assert!(OOP::is_integer_value(val4));
+        // upper bound
+        let val5 = 16383;
+        assert!(OOP::is_integer_value(val5));
+    }
+
+    #[test]
+    fn is_integer_value_falsy_low() {
+        let val = -16385;
+        assert!(!OOP::is_integer_value(val));
+    }
+
+    #[test]
+    fn is_integer_value_falsy_high() {
+        let val = 16834;
+        assert!(!OOP::is_integer_value(val));
+    }
+
+    #[test]
+    fn integer_object_of_returns_integer_OOP() {
+        let val1 = 12345;
+        assert_eq!(OOP::integer_object_of(val1), Ok(OOP::from_raw(0x6073)));
+        let val2 = -12345;
+        assert_eq!(OOP::integer_object_of(val2), Ok(OOP::from_raw(0x9f8f)));
+    }
+
+    #[test]
+    fn integer_object_of_returns_error() {
+        let val = 20000;
+        assert!(OOP::integer_object_of(val).is_err())
     }
 }
