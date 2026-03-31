@@ -20,7 +20,7 @@ impl OOP {
     /// see Bluebook p. 660
     ///
     /// isIntegerObject: objectPointer
-    ///   (objectPointer bitAnd: 1) = 1
+    ///   ↑(objectPointer bitAnd: 1) = 1
     ///
     pub fn is_integer_object(&self) -> bool {
         return (self.value & 0x1) == 1;
@@ -52,7 +52,7 @@ impl OOP {
     /// see Bluebook p. 688
     ///
     /// integerValueOf: objectPointer
-    ///   objectPointer/2
+    ///   ↑objectPointer/2
     ///
     pub fn integer_value_of(&self) -> Result<i16, ObjectMemoryError> {
         if self.is_integer_object() {
@@ -70,7 +70,7 @@ impl OOP {
     /// see Bluebook p. 688 (note that there are typos and logic errors)
     ///
     /// integerValue: valueWord
-    ///   valueWord <= -16384 and: [valueWord > 16834]
+    ///   ↑valueWord <= -16384 and: [valueWord > 16834]
     ///
     pub fn is_integer_value(value: i16) -> bool {
         return value >= -16384 && value < 16383;
@@ -84,7 +84,7 @@ impl OOP {
     /// see Bluebook p. 688
     ///
     /// integerObjectOf: value
-    ///   (value bitShift: 1) + 1
+    ///   ↑(value bitShift: 1) + 1
     ///
     pub fn integer_object_of(value: i16) -> Result<OOP, ObjectMemoryError> {
         if Self::is_integer_value(value) {
