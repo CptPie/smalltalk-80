@@ -184,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn integer_object_of_returns_integer_OOP() {
+    fn integer_object_of_returns_integer_oop() {
         let val1 = 12345;
         assert_eq!(OOP::integer_object_of(val1), Ok(OOP::from_raw(0x6073)));
         let val2 = -12345;
