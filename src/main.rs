@@ -1,6 +1,7 @@
 use minifb::{Key, Window, WindowOptions};
 
 mod errors;
+mod objectmemory;
 mod oop;
 
 const WIDTH: usize = 640;
