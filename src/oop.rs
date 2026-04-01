@@ -4,7 +4,7 @@ use crate::errors::ObjectMemoryError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OOP {
-    value: u16,
+    pub value: u16,
 }
 
 impl OOP {
