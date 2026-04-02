@@ -1,4 +1,9 @@
-use crate::oop::OOP;
+use crate::{
+    globalconstants::{CLASS_SMALL_INTEGER_POINTER, HEADER_SIZE},
+    oop::OOP,
+};
+
+// Custom Type definitions
 
 type HeapSegment = Vec<u16>;
 
@@ -419,4 +424,238 @@ mod heap_accessor_tests {
 //  Public facing API
 // ====================================
 
-impl ObjectMemory {}
+impl ObjectMemory {
+    // ┌─────────────────────┐
+    // │   POINTER ACCESS    │
+    // └─────────────────────┘
+
+    /// Fetch a specific field of an object.
+    ///
+    /// Parameters:
+    ///     - pointer: The pointer to the object
+    ///     - field_index: The 0 indexed field that shall be fetched
+    ///
+    /// Returns:
+    ///     - u16, the raw field data
+    pub fn fetch_pointer(&self, field_index: u16, pointer: OOP) -> u16 {
+        return self.heap_chunk_of_word(pointer, HEADER_SIZE + field_index);
+    }
+
+    /// Store a value to a specific field of an object.
+    ///
+    /// Parameters:
+    ///     - pointer: The pointer to the object
+    ///     - field_index: The 0 indexed field that the value shall be stored at
+    ///     - value: the value to be stored
+    pub fn store_pointer(&mut self, field_index: u16, pointer: OOP, value: u16) {
+        self.heap_chunk_of_word_put(pointer, HEADER_SIZE + field_index, value);
+    }
+
+    // ┌─────────────────────┐
+    // │     RAW ACCESS      │
+    // └─────────────────────┘
+
+    /// Fetch a specific word of an object, without accounting for the header offset.
+    ///
+    /// Parameters:
+    ///     - pointer: The pointer to the object
+    ///     - word_index: The 0 indexed word that shall be fetched
+    ///
+    /// Returns:
+    ///     - u16, the raw word data
+    pub fn fetch_word(&self, word_index: u16, pointer: OOP) -> u16 {
+        return self.heap_chunk_of_word(pointer, word_index);
+    }
+
+    /// Store a specific word of an object, without accounting for the header offset.
+    ///
+    /// Parameters:
+    ///     - pointer: The pointer to the object
+    ///     - word_index: The 0 indexed word that the value shall be stored at
+    ///     - value: The value to be stored
+    pub fn store_word(&mut self, word_index: u16, pointer: OOP, value: u16) {
+        self.heap_chunk_of_word_put(pointer, word_index, value);
+    }
+
+    /// Fetch a specific byte of an object, without accounting for the header offset.
+    ///
+    /// Parameters:
+    ///     - pointer: The pointer to the object
+    ///     - byte_index: The 0 indexed byte that shall be fetched
+    ///
+    /// Returns:
+    ///     - u16, the raw byte data
+    pub fn fetch_byte(&self, byte_index: u16, pointer: OOP) -> u8 {
+        return self.heap_chunk_of_byte(pointer, byte_index);
+    }
+
+    /// Store a specific byte of an object, without accounting for the header offset.
+    ///
+    /// Parameters:
+    ///     - pointer: The pointer to the object
+    ///     - byte_index: The 0 indexed byte that the value shall be stored at
+    ///     - value: The value to be stored
+    pub fn store_byte(&mut self, byte_index: u16, pointer: OOP, value: u8) {
+        self.heap_chunk_of_byte_put(pointer, byte_index, value);
+    }
+
+    // ┌─────────────────────┐
+    // │       LENGTH        │
+    // └─────────────────────┘
+
+    /// Fetch the length of an object in words.
+    ///
+    /// Parameters:
+    ///     - pointer: The pointer to the object
+    ///
+    /// Returns:
+    ///     - u16, the length of the object, in words, excluding the header.
+    ///       (The amount of fields of the object)
+    pub fn fetch_word_length_of(&self, oop: OOP) -> u16 {
+        return self.size_bits_of(oop) - HEADER_SIZE;
+    }
+
+    /// Fetch the length of an object in bytes.
+    ///
+    /// Parameters:
+    ///     - pointer: The pointer to the object
+    ///
+    /// Returns:
+    ///     - u16, the length of the object, in bytes, excluding the header
+    ///       and accounting for the odd bit.
+    pub fn fetch_byte_length_of(&self, oop: OOP) -> u16 {
+        if self.odd_bit_of(oop) {
+            return (self.fetch_word_length_of(oop) * 2) - 1;
+        } else {
+            return self.fetch_word_length_of(oop) * 2;
+        }
+    }
+
+    // ┌─────────────────────┐
+    // │        CLASS        │
+    // └─────────────────────┘
+
+    /// Fetch the class information of an object.
+    ///
+    /// Parameters:
+    ///     - pointer: The pointer to the object
+    ///
+    /// Returns:
+    ///     - CLASS_SMALL_INTEGER_POINTER: pointer to the SmallInteger class if object is an
+    ///     integer
+    ///     - value of the class pointer field of the object otherwise.
+    pub fn fetch_class_of(&self, pointer: OOP) -> u16 {
+        if pointer.is_integer_object() {
+            return CLASS_SMALL_INTEGER_POINTER;
+        } else {
+            return self.class_bits_of(pointer);
+        }
+    }
+}
+
+#[cfg(test)]
+mod api_accessor_tests {
+    use super::*;
+
+    fn dummy_memory() -> ObjectMemory {
+        let mut mem = ObjectMemory {
+            heap: vec![vec![0u16; 64]; 3],
+            object_table: vec![0u16; 64],
+        };
+
+        // OOP 0: segment 0, location 10
+        mem.object_table[0] = 0x0000;
+        mem.object_table[1] = 0x000A;
+
+        // Heap data starting at 10
+        mem.heap[0][10] = 0x0006; //size 6 words
+        mem.heap[0][11] = 0x0020; // class pointer
+        mem.heap[0][12] = 0xAAAA; // field 1
+        mem.heap[0][13] = 0xBBBB; // field 2
+        mem.heap[0][14] = 0xCCCC; // ...
+        mem.heap[0][15] = 0xDDDD; // field {size} -2 (6-2=4)
+
+        // OOP 2: segment 2, location 16, odd amount of bytes
+        mem.object_table[2] = 0x0082;
+        mem.object_table[3] = 0x0010;
+
+        mem.heap[2][16] = 0x0004;
+        mem.heap[2][17] = 0x0034;
+        mem.heap[2][18] = 0xC0FE;
+        mem.heap[2][19] = 0xBA00;
+
+        return mem;
+    }
+
+    #[test]
+    fn fetch_pointer_returns_correct_value() {
+        let mem = dummy_memory();
+        assert_eq!(mem.fetch_pointer(2, OOP::from_raw(0)), 0xCCCC);
+        assert_eq!(mem.fetch_pointer(0, OOP::from_raw(2)), 0xC0FE);
+    }
+
+    #[test]
+    fn store_pointer_returns_correct_value() {
+        let mut mem = dummy_memory();
+        mem.store_pointer(0, OOP::from_raw(0), 0xFFFF);
+        mem.store_pointer(1, OOP::from_raw(2), 0xBEEF);
+        assert_eq!(mem.heap[0][12], 0xFFFF);
+        assert_eq!(mem.heap[2][19], 0xBEEF);
+    }
+
+    #[test]
+    fn fetch_word_returns_correct_value() {
+        let mem = dummy_memory();
+        assert_eq!(mem.fetch_word(1, OOP::from_raw(0)), 0x0020);
+        assert_eq!(mem.fetch_word(3, OOP::from_raw(2)), 0xBA00);
+    }
+
+    #[test]
+    fn store_word_stores_correct_value() {
+        let mut mem = dummy_memory();
+        mem.store_word(0, OOP::from_raw(0), 0xFFFF);
+        mem.store_word(1, OOP::from_raw(2), 0xBEEF);
+        assert_eq!(mem.heap[0][10], 0xFFFF);
+        assert_eq!(mem.heap[2][17], 0xBEEF);
+    }
+
+    #[test]
+    fn fetch_byte_returns_correct_value() {
+        let mem = dummy_memory();
+        assert_eq!(mem.fetch_byte(3, OOP::from_raw(0)), 0x20);
+        assert_eq!(mem.fetch_byte(6, OOP::from_raw(2)), 0xBA);
+    }
+
+    #[test]
+    fn store_byte_stores_correct_value() {
+        let mut mem = dummy_memory();
+        mem.store_byte(3, OOP::from_raw(0), 0x30);
+        mem.store_byte(6, OOP::from_raw(2), 0xAB);
+        assert_eq!(mem.heap[0][11], 0x0030);
+        assert_eq!(mem.heap[2][19], 0xAB00);
+    }
+
+    #[test]
+    fn fetch_word_length_of_returns_correct_value() {
+        let mem = dummy_memory();
+        assert_eq!(mem.fetch_word_length_of(OOP::from_raw(0)), 4);
+        assert_eq!(mem.fetch_word_length_of(OOP::from_raw(2)), 2);
+    }
+
+    #[test]
+    fn fetch_byte_length_of_returns_correct_value() {
+        let mem = dummy_memory();
+        assert_eq!(mem.fetch_byte_length_of(OOP::from_raw(0)), 8);
+        assert_eq!(mem.fetch_byte_length_of(OOP::from_raw(2)), 3);
+    }
+
+    #[test]
+    fn fetch_class_of_returns_correct_value() {
+        let mem = dummy_memory();
+        assert_eq!(mem.fetch_class_of(OOP::from_raw(0)), 0x0020);
+        assert_eq!(
+            mem.fetch_class_of(OOP::from_raw(1)),
+            CLASS_SMALL_INTEGER_POINTER
+        );
+    }
+}
