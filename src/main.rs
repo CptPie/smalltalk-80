@@ -1,6 +1,7 @@
 use minifb::{Key, Window, WindowOptions};
 
 mod errors;
+mod globalconstants;
 mod objectmemory;
 mod oop;
 
