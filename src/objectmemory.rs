@@ -1,20 +1,76 @@
-use std::cmp::min;
+use std::{
+    cmp::min,
+    ops::{Index, IndexMut},
+};
 
 use crate::{
     errors::ObjectMemoryError,
     globalconstants::{
-        BIG_SIZE, CLASS_SMALL_INTEGER_POINTER, FIRST_FREE_CHUNK_LIST, HEADER_SIZE, NON_POINTER,
+        BIG_SIZE, CLASS_SMALL_INTEGER_POINTER, FIRST_FREE_CHUNK_LIST, HEADER_SIZE,
+        HEAP_SEGMENT_SIZE, HEAP_SIZE, LAST_BIG_CHUNK_LIST, NIL_POINTER, NON_POINTER,
     },
     oop::OOP,
 };
 
 // Custom Type definitions
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HeapSegment {
+    data: Vec<u16>,
+}
+impl HeapSegment {
+    fn new() -> Self {
+        HeapSegment {
+            data: vec![0u16; HEAP_SEGMENT_SIZE],
+        }
+    }
+}
 
-type HeapSegment = Vec<u16>;
+// indexing overwrites to make access as easy as array access
+impl Index<usize> for HeapSegment {
+    type Output = u16;
+
+    fn index(&self, index: usize) -> &u16 {
+        &self.data[index]
+    }
+}
+
+impl IndexMut<usize> for HeapSegment {
+    fn index_mut(&mut self, index: usize) -> &mut u16 {
+        &mut self.data[index]
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Heap {
+    data: Vec<HeapSegment>,
+}
+
+impl Heap {
+    fn new() -> Self {
+        Heap {
+            data: vec![HeapSegment::new(); HEAP_SIZE],
+        }
+    }
+}
+
+// indexing overwrites to make access as easy as array access
+impl Index<usize> for Heap {
+    type Output = HeapSegment;
+
+    fn index(&self, index: usize) -> &HeapSegment {
+        &self.data[index]
+    }
+}
+
+impl IndexMut<usize> for Heap {
+    fn index_mut(&mut self, index: usize) -> &mut HeapSegment {
+        &mut self.data[index]
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectMemory {
-    heap: Vec<HeapSegment>,
+    heap: Heap,
     object_table: Vec<u16>,
     free_pointer_list: u16,
     current_segment: u8,
@@ -145,7 +201,7 @@ mod ot_accessor_tests {
 
     fn dummy_memory() -> ObjectMemory {
         return ObjectMemory {
-            heap: vec![vec![0u16; 64]],
+            heap: Heap::new(),
             object_table: vec![0u16; 64],
             free_pointer_list: NON_POINTER,
             current_segment: 0,
@@ -297,7 +353,7 @@ mod ot_free_list_tests {
 
     fn dummy_memory() -> ObjectMemory {
         return ObjectMemory {
-            heap: vec![vec![0u16; 64]],
+            heap: Heap::new(),
             object_table: vec![0u16; 64],
             free_pointer_list: NON_POINTER,
             current_segment: 0,
@@ -470,7 +526,7 @@ mod heap_accessor_tests {
 
     fn dummy_memory() -> ObjectMemory {
         let mut mem = ObjectMemory {
-            heap: vec![vec![0u16; 64]],
+            heap: Heap::new(),
             object_table: vec![0u16; 64],
             free_pointer_list: NON_POINTER,
             current_segment: 0,
@@ -566,7 +622,7 @@ mod heap_free_chunk_tests {
 
     fn dummy_memory() -> ObjectMemory {
         let mut mem = ObjectMemory {
-            heap: vec![vec![NON_POINTER; 64]],
+            heap: Heap::new(),
             object_table: vec![0u16; 64],
             free_pointer_list: NON_POINTER,
             current_segment: 0,
@@ -677,11 +733,16 @@ impl ObjectMemory {
 
     /// Store a value to a specific field of an object.
     ///
+    /// This also handles modifying all reference counts.
+    ///
     /// Parameters:
     ///     - pointer: The pointer to the object
     ///     - field_index: The 0 indexed field that the value shall be stored at
     ///     - value: the value to be stored
     pub fn store_pointer(&mut self, field_index: u16, pointer: OOP, value: u16) {
+        let old_value = self.fetch_pointer(field_index, pointer);
+        self.increase_references_to(OOP::from_raw(value));
+        self.decrease_references_to(OOP::from_raw(old_value));
         self.heap_chunk_of_word_put(pointer, HEADER_SIZE + field_index, value);
     }
 
@@ -785,24 +846,142 @@ impl ObjectMemory {
             return self.class_bits_of(pointer);
         }
     }
+
+    /// The count of an object determines if it will be deallocated or not
+    /// As long as one other object references it, it will not get deleted.
+    /// If an object reaches more than 128 references it will be seen as
+    /// 'saturated' and will never get deallocated.
+
+    /// Increases the reference count of an OOP.
+    ///
+    /// If the object is an integer object, the count will not be increased.
+    ///
+    /// Parameters:
+    ///     - oop: The pointer to the object
+    pub fn increase_references_to(&mut self, oop: OOP) {
+        if oop.is_integer_object() {
+            return;
+        }
+        let cnt = self.count_bits_of(oop);
+        if cnt < 128 {
+            self.count_bits_of_put(oop, cnt + 1);
+        }
+    }
+
+    /// Decreases the reference count of an OOP.
+    ///
+    /// If the object is an integer object, the count will not be decreased.
+    ///
+    /// If the count of an object reaches 0, it will get deallocated. When this happens
+    /// all objects referenced by this object will get their count decremented, possibly
+    /// cascading deletions.
+    ///
+    /// If the count of an object reaches 128, it is regarded as saturated and
+    /// will not get the count decreased.
+    ///
+    /// Parameters:
+    ///     - oop: The pointer to the object
+    pub fn decrease_references_to(&mut self, oop: OOP) {
+        if oop.is_integer_object() {
+            return;
+        }
+        let mut cnt = self.count_bits_of(oop);
+        if cnt >= 128 {
+            // object is saturated -> permanent -> will never get deallocated
+            return;
+        }
+        if cnt == 0 {
+            // shouldn't really happen but necessary guard clause
+            // if an object has a count of 0 it would already be deallocated
+            return;
+        }
+        cnt = cnt - 1;
+        if cnt == 0 {
+            // the object will get deallocated
+            let size = self.size_bits_of(oop);
+            let last_pointer = if self.pointer_bit_of(oop) {
+                size // all fields are pointers
+            } else {
+                HEADER_SIZE // only the class field can be a pointer
+            };
+
+            // decrement the reference counts of all referenced objects
+            for i in 1..last_pointer {
+                let field_oop = OOP::from_raw(self.heap_chunk_of_word(oop, i));
+                self.decrease_references_to(field_oop);
+            }
+
+            self.deallocate(oop);
+        } else {
+            self.count_bits_of_put(oop, cnt);
+        }
+    }
+
+    pub fn instantiate_class_with_pointers(
+        &mut self,
+        class: u16,
+        length: u16,
+    ) -> Result<OOP, ObjectMemoryError> {
+        let size = HEADER_SIZE + length;
+        let result = self.attempt_to_allocate_chunk_in_current_segment(size);
+        if result.is_err() {
+            //self.compact_current_segment();
+            //// retry
+            //let retry_result = self.attempt_to_allocate_chunk_in_current_segment(size);
+            //if retry_result.is_err() {
+            //
+            //}
+            todo!()
+        }
+        let oop = self.obtain_pointer(size, result.unwrap())?;
+        self.class_bits_of_put(oop, class);
+        self.pointer_bit_of_put(oop, true);
+        for i in 0..length {
+            self.heap_chunk_of_word_put(oop, i, NIL_POINTER);
+        }
+        return Ok(oop);
+    }
+
+    pub fn instantiate_class_with_words(
+        &mut self,
+        class: u16,
+        length: u16,
+    ) -> Result<OOP, ObjectMemoryError> {
+        todo!()
+    }
+
+    pub fn instantiate_class_with_bytes(
+        &mut self,
+        class: u16,
+        length: u16,
+    ) -> Result<OOP, ObjectMemoryError> {
+        todo!()
+    }
 }
 
 #[cfg(test)]
 mod api_accessor_tests {
-    use crate::globalconstants::NON_POINTER;
+    use crate::globalconstants::{BIG_SIZE, FIRST_FREE_CHUNK_LIST, NON_POINTER};
 
     use super::*;
 
     fn dummy_memory() -> ObjectMemory {
         let mut mem = ObjectMemory {
-            heap: vec![vec![0u16; 64]; 3],
+            heap: Heap::new(),
             object_table: vec![0u16; 64],
             free_pointer_list: NON_POINTER,
             current_segment: 0,
         };
 
-        // OOP 0: segment 0, location 10
-        mem.object_table[0] = 0x0000;
+        // initialize free chunk list heads
+        for seg in 0..3 {
+            for i in 0..=BIG_SIZE as usize {
+                mem.heap[seg][(FIRST_FREE_CHUNK_LIST as usize) + i] = NON_POINTER;
+            }
+        }
+
+        // OOP 0: segment 0, location 10, count=5
+        mem.object_table[0] = 0x0500;
         mem.object_table[1] = 0x000A;
 
         // Heap data starting at 10
@@ -813,8 +992,8 @@ mod api_accessor_tests {
         mem.heap[0][14] = 0xCCCC; // ...
         mem.heap[0][15] = 0xDDDD; // field {size} -2 (6-2=4)
 
-        // OOP 2: segment 2, location 16, odd amount of bytes
-        mem.object_table[2] = 0x0082;
+        // OOP 2: segment 2, location 16, odd amount of bytes, count=5
+        mem.object_table[2] = 0x0582;
         mem.object_table[3] = 0x0010;
 
         mem.heap[2][16] = 0x0004;
@@ -833,12 +1012,15 @@ mod api_accessor_tests {
     }
 
     #[test]
-    fn store_pointer_returns_correct_value() {
+    fn store_pointer_stores_correct_value() {
         let mut mem = dummy_memory();
-        mem.store_pointer(0, OOP::from_raw(0), 0xFFFF);
-        mem.store_pointer(1, OOP::from_raw(2), 0xBEEF);
-        assert_eq!(mem.heap[0][12], 0xFFFF);
-        assert_eq!(mem.heap[2][19], 0xBEEF);
+        // use SmallIntegers (odd values) to avoid ref counting OT lookups
+        mem.heap[0][12] = 0x0003; // old value: SmallInteger
+        mem.heap[2][18] = 0x0005; // old value: SmallInteger
+        mem.store_pointer(0, OOP::from_raw(0), 0x0007); // new: SmallInteger
+        mem.store_pointer(0, OOP::from_raw(2), 0x0009); // new: SmallInteger
+        assert_eq!(mem.heap[0][12], 0x0007);
+        assert_eq!(mem.heap[2][18], 0x0009);
     }
 
     #[test]
@@ -895,6 +1077,185 @@ mod api_accessor_tests {
             mem.fetch_class_of(OOP::from_raw(1)),
             CLASS_SMALL_INTEGER_POINTER
         );
+    }
+}
+
+#[cfg(test)]
+mod ref_counting_tests {
+    use crate::globalconstants::NON_POINTER;
+
+    use super::*;
+
+    fn dummy_memory() -> ObjectMemory {
+        let mut mem = ObjectMemory {
+            heap: Heap::new(),
+            object_table: vec![0u16; 64],
+            free_pointer_list: NON_POINTER,
+            current_segment: 0,
+        };
+
+        // OOP 0: segment 0, location 22, count=5, pointer bit=1
+        // A pointer object with 2 fields pointing to OOP 4 and OOP 6
+        mem.object_table[0] = 0x0540; // count=5, P=1
+        mem.object_table[1] = 0x0016; // location=22
+        mem.heap[0][22] = 0x0004; // size 4 (header + 2 fields)
+        mem.heap[0][23] = 0x0020; // class pointer
+        mem.heap[0][24] = 0x0004; // field 0 -> OOP 4
+        mem.heap[0][25] = 0x0006; // field 1 -> OOP 6
+
+        // OOP 2: segment 0, location 30, count=3, pointer bit=0 (non-pointer object)
+        mem.object_table[2] = 0x0300; // count=3, P=0
+        mem.object_table[3] = 0x001E; // location=30
+        mem.heap[0][30] = 0x0004; // size 4
+        mem.heap[0][31] = 0x0020; // class pointer
+        mem.heap[0][32] = 0x1234; // raw data, not a pointer
+        mem.heap[0][33] = 0x5678; // raw data
+
+        // OOP 4: segment 0, location 38, count=2
+        mem.object_table[4] = 0x0200; // count=2
+        mem.object_table[5] = 0x0026; // location=38
+        mem.heap[0][38] = 0x0003; // size 3
+        mem.heap[0][39] = 0x0020; // class
+        mem.heap[0][40] = 0x0000; // one field
+
+        // OOP 6: segment 0, location 46, count=1
+        mem.object_table[6] = 0x0100; // count=1
+        mem.object_table[7] = 0x002E; // location=46
+        mem.heap[0][46] = 0x0002; // size 2 (header only, no fields)
+        mem.heap[0][47] = 0x0020; // class
+
+        // initialize free chunk list heads
+        for i in 0..=BIG_SIZE as usize {
+            mem.heap[0][(FIRST_FREE_CHUNK_LIST as usize) + i] = NON_POINTER;
+        }
+
+        return mem;
+    }
+
+    // ┌──────────────────────────────────────┐
+    // │   increase_references_to tests       │
+    // └──────────────────────────────────────┘
+
+    #[test]
+    fn increase_references_increments_count() {
+        let mut mem = dummy_memory();
+        mem.increase_references_to(OOP::from_raw(4));
+        assert_eq!(mem.count_bits_of(OOP::from_raw(4)), 3);
+    }
+
+    #[test]
+    fn increase_references_ignores_integers() {
+        let mut mem = dummy_memory();
+        // SmallInteger — should do nothing, no panic
+        mem.increase_references_to(OOP::from_raw(3));
+    }
+
+    #[test]
+    fn increase_references_saturates_at_128() {
+        let mut mem = dummy_memory();
+        mem.count_bits_of_put(OOP::from_raw(4), 128);
+        mem.increase_references_to(OOP::from_raw(4));
+        assert_eq!(mem.count_bits_of(OOP::from_raw(4)), 128);
+    }
+
+    #[test]
+    fn increase_references_just_below_saturation() {
+        let mut mem = dummy_memory();
+        mem.count_bits_of_put(OOP::from_raw(4), 127);
+        mem.increase_references_to(OOP::from_raw(4));
+        assert_eq!(mem.count_bits_of(OOP::from_raw(4)), 128);
+    }
+
+    // ┌──────────────────────────────────────┐
+    // │   decrease_references_to tests       │
+    // └──────────────────────────────────────┘
+
+    #[test]
+    fn decrease_references_decrements_count() {
+        let mut mem = dummy_memory();
+        mem.decrease_references_to(OOP::from_raw(0));
+        assert_eq!(mem.count_bits_of(OOP::from_raw(0)), 4);
+    }
+
+    #[test]
+    fn decrease_references_ignores_integers() {
+        let mut mem = dummy_memory();
+        // SmallInteger — should do nothing, no panic
+        mem.decrease_references_to(OOP::from_raw(3));
+    }
+
+    #[test]
+    fn decrease_references_ignores_saturated() {
+        let mut mem = dummy_memory();
+        mem.count_bits_of_put(OOP::from_raw(4), 128);
+        mem.decrease_references_to(OOP::from_raw(4));
+        assert_eq!(mem.count_bits_of(OOP::from_raw(4)), 128);
+    }
+
+    #[test]
+    fn decrease_references_deallocates_at_zero() {
+        let mut mem = dummy_memory();
+        // OOP 6 has count=1, decrementing should deallocate it
+        mem.decrease_references_to(OOP::from_raw(6));
+        assert!(mem.free_bit_of(OOP::from_raw(6)));
+        assert_eq!(mem.free_pointer_list, 6);
+    }
+
+    #[test]
+    fn decrease_references_cascades_on_pointer_object() {
+        let mut mem = dummy_memory();
+        // OOP 0 has count=5, P=1, fields pointing to OOP 4 (count=2) and OOP 6 (count=1)
+        // Set OOP 0 count to 1 so it gets deallocated
+        mem.count_bits_of_put(OOP::from_raw(0), 1);
+        mem.decrease_references_to(OOP::from_raw(0));
+        // OOP 0 should be deallocated
+        assert!(mem.free_bit_of(OOP::from_raw(0)));
+        // OOP 4 count should have gone from 2 to 1
+        assert_eq!(mem.count_bits_of(OOP::from_raw(4)), 1);
+        // OOP 6 had count=1, should also be deallocated (cascading)
+        assert!(mem.free_bit_of(OOP::from_raw(6)));
+    }
+
+    #[test]
+    fn decrease_references_no_cascade_on_nonpointer_object() {
+        let mut mem = dummy_memory();
+        // OOP 2 has count=3, P=0 (non-pointer), raw data 0x1234 and 0x5678
+        // Set count to 1 so it gets deallocated
+        mem.count_bits_of_put(OOP::from_raw(2), 1);
+        mem.decrease_references_to(OOP::from_raw(2));
+        // OOP 2 should be deallocated
+        assert!(mem.free_bit_of(OOP::from_raw(2)));
+        // The class (0x0020) gets decrease_references_to called on it
+        // but 0x0020 is OOP 32 which doesn't exist in our test setup
+        // — this tests that raw data fields are NOT treated as pointers
+    }
+
+    // ┌──────────────────────────────────────┐
+    // │   store_pointer ref counting tests   │
+    // └──────────────────────────────────────┘
+
+    #[test]
+    fn store_pointer_increments_new_decrements_old() {
+        let mut mem = dummy_memory();
+        // OOP 0 field 0 currently points to OOP 4 (count=2)
+        // Store OOP 6 (count=1) into field 0
+        mem.store_pointer(0, OOP::from_raw(0), 0x0006);
+        // OOP 6 count should go from 1 to 2 (increased)
+        assert_eq!(mem.count_bits_of(OOP::from_raw(6)), 2);
+        // OOP 4 count should go from 2 to 1 (decreased)
+        assert_eq!(mem.count_bits_of(OOP::from_raw(4)), 1);
+        // field should now hold OOP 6
+        assert_eq!(mem.fetch_pointer(0, OOP::from_raw(0)), 0x0006);
+    }
+
+    #[test]
+    fn store_pointer_same_value_no_change() {
+        let mut mem = dummy_memory();
+        // Store same OOP 4 back — count should stay the same
+        // increase then decrease = net zero
+        let old_count = mem.count_bits_of(OOP::from_raw(4));
+        mem.store_pointer(0, OOP::from_raw(0), 0x0004);
+        assert_eq!(mem.count_bits_of(OOP::from_raw(4)), old_count);
     }
 }
 
@@ -992,6 +1353,73 @@ impl ObjectMemory {
         self.to_free_pointer_list_add(oop);
         self.to_free_chunk_list_add(seg, size, loc);
     }
+
+    /// Clears all free lists by setting the top to NON_POINTER
+    fn abandon_free_chunks_in_segment(&mut self, segment: u8) {
+        for i in 0..=BIG_SIZE {
+            self.heap[segment as usize][(FIRST_FREE_CHUNK_LIST + i) as usize] = NON_POINTER
+        }
+    }
+
+    fn compact_current_segment(&mut self) {
+        // 'forget' all free chunks since we'll realign anyways
+        self.abandon_free_chunks_in_segment(self.current_segment);
+
+        // temporary structure to keep track of things
+        struct Entry {
+            oop: OOP,
+            location: u16,
+            size: u16,
+        };
+
+        let mut entries: Vec<Entry> = Vec::new();
+
+        // loop through the object table, take a look at each OOP (every second word)
+        for i in (0..self.object_table.len()).step_by(2) {
+            let oop = OOP::from_raw(i as u16);
+
+            // If it is not free (so an object) and part of the segment we're currently compacting
+            // save it to the list
+            if !self.free_bit_of(oop) && self.segment_bits_of(oop) == self.current_segment {
+                entries.push(Entry {
+                    oop: oop,
+                    location: self.location_bits_of(oop),
+                    size: self.size_bits_of(oop),
+                });
+            }
+        }
+
+        // sort the list in ascending order of the location
+        entries.sort_by_key(|e| e.location);
+
+        // slide the elements to the front to free up space at the back
+        let mut low_mark = LAST_BIG_CHUNK_LIST + 1;
+        for entry in &entries {
+            if entry.location > low_mark {
+                for i in 0..entry.size {
+                    self.heap[self.current_segment as usize][(low_mark + i) as usize] =
+                        self.heap[self.current_segment as usize][(entry.location + i) as usize]
+                }
+                self.location_bits_of_put(entry.oop, low_mark);
+            }
+            if entry.location == low_mark {
+                // do nothing, entry is already in place
+            }
+            if entry.location < low_mark {
+                // we fucked up somehow
+                panic!("Compacting failed, sorted entries were not sorted");
+            }
+            low_mark += entry.size;
+        }
+
+        if let Some(last) = entries.last() {
+            let old_end = last.location + last.size;
+            let remaining = old_end - low_mark;
+            if remaining > 0 {
+                self.to_free_chunk_list_add(self.current_segment, remaining, low_mark);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1002,11 +1430,15 @@ mod allocator_tests {
 
     fn dummy_memory() -> ObjectMemory {
         let mut mem = ObjectMemory {
-            heap: vec![vec![NON_POINTER; 256]],
+            heap: Heap::new(),
             object_table: vec![0u16; 64],
             free_pointer_list: NON_POINTER,
             current_segment: 0,
         };
+        // mark all OT entries as free so compaction doesn't pick up garbage
+        for i in (0..64).step_by(2) {
+            mem.free_bit_of_put(OOP::from_raw(i as u16), true);
+        }
         // initialize free chunk list heads to NON_POINTER (empty)
         for i in 0..=(BIG_SIZE as usize) {
             mem.heap[0][(FIRST_FREE_CHUNK_LIST as usize) + i] = NON_POINTER;
@@ -1045,7 +1477,10 @@ mod allocator_tests {
         let result = memory.attempt_to_allocate_chunk_in_current_segment(4);
         assert_eq!(result, Ok(30));
         // remainder (size 26) should be on the big free list
-        assert_eq!(memory.heap[0][(FIRST_FREE_CHUNK_LIST + BIG_SIZE) as usize], 34);
+        assert_eq!(
+            memory.heap[0][(FIRST_FREE_CHUNK_LIST + BIG_SIZE) as usize],
+            34
+        );
         assert_eq!(memory.heap[0][34], 26); // remainder size
     }
 
@@ -1142,5 +1577,203 @@ mod allocator_tests {
         // should be able to get the chunk back
         let chunk = memory.remove_from_free_chunk_list(0, 6);
         assert_eq!(chunk, Ok(30));
+    }
+
+    // ┌──────────────────────────────────────────────────┐
+    // │     abandon_free_chunks_in_segment tests         │
+    // └──────────────────────────────────────────────────┘
+
+    #[test]
+    fn abandon_clears_all_free_chunk_lists() {
+        let mut memory = dummy_memory();
+        // add chunks to several lists
+        memory.to_free_chunk_list_add(0, 4, 100);
+        memory.to_free_chunk_list_add(0, 10, 200);
+        memory.to_free_chunk_list_add(0, 25, 300); // big list
+
+        memory.abandon_free_chunks_in_segment(0);
+
+        // all list heads should be NON_POINTER
+        for i in 0..=BIG_SIZE as usize {
+            assert_eq!(
+                memory.heap[0][(FIRST_FREE_CHUNK_LIST as usize) + i],
+                NON_POINTER,
+                "free list head at index {} was not cleared",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn abandon_only_affects_target_segment() {
+        let mut memory = dummy_memory();
+        // initialize segment 1 free list heads
+        for i in 0..=(BIG_SIZE as usize) {
+            memory.heap[1][(FIRST_FREE_CHUNK_LIST as usize) + i] = NON_POINTER;
+        }
+        // add chunks to both segments
+        memory.to_free_chunk_list_add(0, 4, 100);
+        memory.to_free_chunk_list_add(1, 4, 100);
+
+        memory.abandon_free_chunks_in_segment(0);
+
+        // segment 0 should be cleared
+        assert_eq!(
+            memory.heap[0][(FIRST_FREE_CHUNK_LIST + 4) as usize],
+            NON_POINTER
+        );
+        // segment 1 should still have its chunk
+        assert_eq!(memory.heap[1][(FIRST_FREE_CHUNK_LIST + 4) as usize], 100);
+    }
+
+    // ┌──────────────────────────────────────────────���───┐
+    // │        compact_current_segment tests             │
+    // └──────────────────────────────────────────────────┘
+
+    #[test]
+    fn compact_slides_objects_down() {
+        let mut memory = dummy_memory();
+        // Object A: OOP 0, location 100, size 4
+        memory.object_table[0] = 0x0100; // count=1
+        memory.object_table[1] = 100;
+        memory.heap[0][100] = 4; // size
+        memory.heap[0][101] = 0x0020; // class
+        memory.heap[0][102] = 0xAAAA;
+        memory.heap[0][103] = 0xBBBB;
+
+        // Object B: OOP 2, location 200, size 3
+        memory.object_table[2] = 0x0100; // count=1
+        memory.object_table[3] = 200;
+        memory.heap[0][200] = 3;
+        memory.heap[0][201] = 0x0020;
+        memory.heap[0][202] = 0xCCCC;
+
+        memory.compact_current_segment();
+
+        // Both objects should be slid to the front (after free list heads)
+        let base = (LAST_BIG_CHUNK_LIST + 1) as usize;
+
+        // Object A should be at base
+        assert_eq!(memory.location_bits_of(OOP::from_raw(0)), base as u16);
+        assert_eq!(memory.heap[0][base], 4);
+        assert_eq!(memory.heap[0][base + 1], 0x0020);
+        assert_eq!(memory.heap[0][base + 2], 0xAAAA);
+        assert_eq!(memory.heap[0][base + 3], 0xBBBB);
+
+        // Object B should follow directly after A
+        let b_base = base + 4;
+        assert_eq!(memory.location_bits_of(OOP::from_raw(2)), b_base as u16);
+        assert_eq!(memory.heap[0][b_base], 3);
+        assert_eq!(memory.heap[0][b_base + 1], 0x0020);
+        assert_eq!(memory.heap[0][b_base + 2], 0xCCCC);
+    }
+
+    #[test]
+    fn compact_already_packed_is_noop() {
+        let mut memory = dummy_memory();
+        let base = (LAST_BIG_CHUNK_LIST + 1) as u16;
+
+        // Object already at the lowest possible location
+        memory.object_table[0] = 0x0100; // count=1
+        memory.object_table[1] = base;
+        memory.heap[0][base as usize] = 3;
+        memory.heap[0][(base + 1) as usize] = 0x0020;
+        memory.heap[0][(base + 2) as usize] = 0x1234;
+
+        memory.compact_current_segment();
+
+        // Should not have moved
+        assert_eq!(memory.location_bits_of(OOP::from_raw(0)), base);
+        assert_eq!(memory.heap[0][(base + 2) as usize], 0x1234);
+    }
+
+    #[test]
+    fn compact_reclaims_free_space() {
+        let mut memory = dummy_memory();
+        // Object: OOP 0, location 200, size 4
+        memory.object_table[0] = 0x0100;
+        memory.object_table[1] = 200;
+        memory.heap[0][200] = 4;
+        memory.heap[0][201] = 0x0020;
+        memory.heap[0][202] = 0xAAAA;
+        memory.heap[0][203] = 0xBBBB;
+
+        memory.compact_current_segment();
+
+        let base = (LAST_BIG_CHUNK_LIST + 1) as u16;
+        let free_start = base + 4;
+        // The gap between original end (204) and new end should be a free chunk
+        let free_size = 204 - free_start;
+        // free chunk should be on the appropriate list
+        if free_size >= BIG_SIZE {
+            assert_eq!(
+                memory.heap[0][(FIRST_FREE_CHUNK_LIST + BIG_SIZE) as usize],
+                free_start
+            );
+        } else {
+            assert_eq!(
+                memory.heap[0][(FIRST_FREE_CHUNK_LIST + free_size) as usize],
+                free_start
+            );
+        }
+    }
+
+    #[test]
+    fn compact_skips_free_entries() {
+        let mut memory = dummy_memory();
+        // OOP 0: live object at location 100
+        memory.object_table[0] = 0x0100; // count=1
+        memory.object_table[1] = 100;
+        memory.heap[0][100] = 3;
+        memory.heap[0][101] = 0x0020;
+        memory.heap[0][102] = 0xAAAA;
+
+        // OOP 2: free entry (should be ignored)
+        memory.free_bit_of_put(OOP::from_raw(2), true);
+
+        // OOP 4: live object at location 200
+        memory.object_table[4] = 0x0100; // count=1
+        memory.object_table[5] = 200;
+        memory.heap[0][200] = 3;
+        memory.heap[0][201] = 0x0020;
+        memory.heap[0][202] = 0xBBBB;
+
+        memory.compact_current_segment();
+
+        let base = (LAST_BIG_CHUNK_LIST + 1) as usize;
+        // OOP 0 at base
+        assert_eq!(memory.location_bits_of(OOP::from_raw(0)), base as u16);
+        // OOP 4 right after
+        assert_eq!(memory.location_bits_of(OOP::from_raw(4)), (base + 3) as u16);
+        // OOP 2 still free
+        assert!(memory.free_bit_of(OOP::from_raw(2)));
+    }
+
+    #[test]
+    fn compact_skips_other_segments() {
+        let mut memory = dummy_memory();
+        memory.current_segment = 0;
+
+        // OOP 0: segment 0, location 100
+        memory.object_table[0] = 0x0100; // count=1, segment=0
+        memory.object_table[1] = 100;
+        memory.heap[0][100] = 3;
+        memory.heap[0][101] = 0x0020;
+        memory.heap[0][102] = 0xAAAA;
+
+        // OOP 2: segment 1, location 100
+        memory.object_table[2] = 0x0101; // count=1, segment=1
+        memory.object_table[3] = 100;
+        memory.heap[1][100] = 3;
+        memory.heap[1][101] = 0x0020;
+        memory.heap[1][102] = 0xBBBB;
+
+        memory.compact_current_segment();
+
+        // OOP 0 should have moved (segment 0 was compacted)
+        let base = (LAST_BIG_CHUNK_LIST + 1) as u16;
+        assert_eq!(memory.location_bits_of(OOP::from_raw(0)), base);
+        // OOP 2 should be untouched (segment 1)
+        assert_eq!(memory.location_bits_of(OOP::from_raw(2)), 100);
     }
 }

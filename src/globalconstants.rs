@@ -1,3 +1,11 @@
+/// Size of a heap segment (in words), anything higher wouldnt make sense because of the 16 bit
+/// addresses
+pub const HEAP_SEGMENT_SIZE: usize = 65536;
+
+/// Amount of heap segments available for the heap. The 4 bit segment field in the OOP limits us to
+/// 16 segements, resulting in a 2 MB heap
+pub const HEAP_SIZE: usize = 16;
+
 /// Size (in words) of an object header
 pub const HEADER_SIZE: u16 = 2;
 
