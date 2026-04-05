@@ -917,23 +917,44 @@ impl ObjectMemory {
         }
     }
 
+    fn allocate_with_retries(&mut self, size: u16) -> Result<u16, ObjectMemoryError> {
+        let mut result = self.attempt_to_allocate_chunk_in_current_segment(size);
+
+        if result.is_err() {
+            self.compact_current_segment();
+            result = self.attempt_to_allocate_chunk_in_current_segment(size);
+        }
+
+        if result.is_err() {
+            let original_segment = self.current_segment;
+            for i in 0..HEAP_SIZE {
+                if i == original_segment as usize {
+                    continue;
+                }
+                self.current_segment = i as u8;
+                result = self.attempt_to_allocate_chunk_in_current_segment(size);
+                if result.is_err() {
+                    self.compact_current_segment();
+                    result = self.attempt_to_allocate_chunk_in_current_segment(size);
+                }
+                if result.is_ok() {
+                    break;
+                }
+            }
+        }
+
+        return result;
+    }
+
     pub fn instantiate_class_with_pointers(
         &mut self,
         class: u16,
         length: u16,
     ) -> Result<OOP, ObjectMemoryError> {
         let size = HEADER_SIZE + length;
-        let result = self.attempt_to_allocate_chunk_in_current_segment(size);
-        if result.is_err() {
-            //self.compact_current_segment();
-            //// retry
-            //let retry_result = self.attempt_to_allocate_chunk_in_current_segment(size);
-            //if retry_result.is_err() {
-            //
-            //}
-            todo!()
-        }
-        let oop = self.obtain_pointer(size, result.unwrap())?;
+        let result = self.allocate_with_retries(size);
+
+        let oop = self.obtain_pointer(size, result?)?;
         self.class_bits_of_put(oop, class);
         self.pointer_bit_of_put(oop, true);
         for i in 0..length {
@@ -947,7 +968,16 @@ impl ObjectMemory {
         class: u16,
         length: u16,
     ) -> Result<OOP, ObjectMemoryError> {
-        todo!()
+        let size = HEADER_SIZE + length;
+        let result = self.allocate_with_retries(size);
+
+        let oop = self.obtain_pointer(size, result?)?;
+        self.class_bits_of_put(oop, class);
+
+        for i in 0..length {
+            self.heap_chunk_of_word_put(oop, i, 0x0000);
+        }
+        return Ok(oop);
     }
 
     pub fn instantiate_class_with_bytes(
@@ -955,7 +985,17 @@ impl ObjectMemory {
         class: u16,
         length: u16,
     ) -> Result<OOP, ObjectMemoryError> {
-        todo!()
+        let size = HEADER_SIZE + (length + 1) / 2;
+        let result = self.allocate_with_retries(size);
+
+        let oop = self.obtain_pointer(size, result?)?;
+        self.class_bits_of_put(oop, class);
+        self.odd_bit_of_put(oop, length % 2 == 1);
+
+        for i in 0..length {
+            self.heap_chunk_of_byte_put(oop, i, 0x00);
+        }
+        return Ok(oop);
     }
 }
 
