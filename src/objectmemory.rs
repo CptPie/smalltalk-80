@@ -1,5 +1,10 @@
+use std::cmp::min;
+
 use crate::{
-    globalconstants::{CLASS_SMALL_INTEGER_POINTER, HEADER_SIZE},
+    errors::ObjectMemoryError,
+    globalconstants::{
+        BIG_SIZE, CLASS_SMALL_INTEGER_POINTER, FIRST_FREE_CHUNK_LIST, HEADER_SIZE, NON_POINTER,
+    },
     oop::OOP,
 };
 
@@ -11,6 +16,8 @@ type HeapSegment = Vec<u16>;
 pub struct ObjectMemory {
     heap: Vec<HeapSegment>,
     object_table: Vec<u16>,
+    free_pointer_list: u16,
+    current_segment: u8,
 }
 
 // ====================================
@@ -111,16 +118,37 @@ impl ObjectMemory {
     fn location_bits_of_put(&mut self, oop: OOP, new_location: u16) {
         self.object_table[(oop.value + 1) as usize] = new_location
     }
+
+    fn to_free_pointer_list_add(&mut self, oop: OOP) {
+        self.free_bit_of_put(oop, true);
+        self.location_bits_of_put(oop, self.free_pointer_list);
+        self.free_pointer_list = oop.value;
+    }
+
+    fn remove_from_free_pointer_list(&mut self) -> Result<OOP, ObjectMemoryError> {
+        let head = self.free_pointer_list;
+        if head == NON_POINTER {
+            return Err(ObjectMemoryError::NoFreeEntries);
+        }
+        let oop = OOP::from_raw(head);
+        self.free_pointer_list = self.location_bits_of(oop);
+        self.free_bit_of_put(oop, false);
+        return Ok(oop);
+    }
 }
 
 #[cfg(test)]
 mod ot_accessor_tests {
+    use crate::globalconstants::NON_POINTER;
+
     use super::*;
 
     fn dummy_memory() -> ObjectMemory {
         return ObjectMemory {
             heap: vec![vec![0u16; 64]],
             object_table: vec![0u16; 64],
+            free_pointer_list: NON_POINTER,
+            current_segment: 0,
         };
     }
 
@@ -261,6 +289,72 @@ mod ot_accessor_tests {
     }
 }
 
+#[cfg(test)]
+mod ot_free_list_tests {
+    use crate::globalconstants::NON_POINTER;
+
+    use super::*;
+
+    fn dummy_memory() -> ObjectMemory {
+        return ObjectMemory {
+            heap: vec![vec![0u16; 64]],
+            object_table: vec![0u16; 64],
+            free_pointer_list: NON_POINTER,
+            current_segment: 0,
+        };
+    }
+
+    #[test]
+    fn add_to_empty_list() {
+        let mut memory = dummy_memory();
+        memory.to_free_pointer_list_add(OOP::from_raw(4));
+        assert_eq!(memory.free_pointer_list, 4);
+        assert!(memory.free_bit_of(OOP::from_raw(4)));
+        assert_eq!(memory.location_bits_of(OOP::from_raw(4)), NON_POINTER);
+    }
+
+    #[test]
+    fn add_multiple_to_list() {
+        let mut memory = dummy_memory();
+        memory.to_free_pointer_list_add(OOP::from_raw(4));
+        memory.to_free_pointer_list_add(OOP::from_raw(6));
+        memory.to_free_pointer_list_add(OOP::from_raw(8));
+        // head should be the last added
+        assert_eq!(memory.free_pointer_list, 8);
+        // chain: 8 -> 6 -> 4 -> NON_POINTER
+        assert_eq!(memory.location_bits_of(OOP::from_raw(8)), 6);
+        assert_eq!(memory.location_bits_of(OOP::from_raw(6)), 4);
+        assert_eq!(memory.location_bits_of(OOP::from_raw(4)), NON_POINTER);
+    }
+
+    #[test]
+    fn remove_from_list() {
+        let mut memory = dummy_memory();
+        memory.to_free_pointer_list_add(OOP::from_raw(4));
+        memory.to_free_pointer_list_add(OOP::from_raw(6));
+        let result = memory.remove_from_free_pointer_list();
+        assert_eq!(result, Ok(OOP::from_raw(6)));
+        assert!(!memory.free_bit_of(OOP::from_raw(6)));
+        assert_eq!(memory.free_pointer_list, 4);
+    }
+
+    #[test]
+    fn remove_until_empty() {
+        let mut memory = dummy_memory();
+        memory.to_free_pointer_list_add(OOP::from_raw(4));
+        memory.to_free_pointer_list_add(OOP::from_raw(6));
+        assert!(memory.remove_from_free_pointer_list().is_ok());
+        assert!(memory.remove_from_free_pointer_list().is_ok());
+        assert!(memory.remove_from_free_pointer_list().is_err());
+    }
+
+    #[test]
+    fn remove_from_empty_list_returns_error() {
+        let mut memory = dummy_memory();
+        assert!(memory.remove_from_free_pointer_list().is_err());
+    }
+}
+
 // ====================================
 //  Heap Access
 // ====================================
@@ -326,16 +420,60 @@ impl ObjectMemory {
     fn class_bits_of_put(&mut self, oop: OOP, value: u16) {
         self.heap_chunk_of_word_put(oop, 1, value);
     }
+
+    // The heap is segmented into 'lists' of u16 words. Each segment holds its own Free Lists.
+    // The Lists start at FIRST_FREE_CHUNK_LIST at size 2 (chunk header size), the second at size 3
+    // and so on till BIG_SIZE=20 which is the 'overflow' list for everything bigger than 20 words.
+    // The head of a list points at the most recently freed chunk of that size.
+    // When we want to add a new item to the free list, we set that chunks class field (used here
+    // to point to the previous head of the list) to the old head. The size of the new chunk freed
+    // chunk is written to word 0 (as a double reference which list it is a part of [remember lists
+    // are determined by size]).
+
+    fn to_free_chunk_list_add(&mut self, segment: u8, size: u16, chunk_location: u16) {
+        // determine which list to insert into
+        let list_index = min(size, BIG_SIZE);
+        // get current head
+        let list_head = self.heap[segment as usize][(FIRST_FREE_CHUNK_LIST + list_index) as usize];
+        // write header at the freed chunk
+        self.heap[segment as usize][chunk_location as usize] = size;
+        self.heap[segment as usize][(chunk_location + 1) as usize] = list_head;
+        // point the head to the new chunk
+        self.heap[segment as usize][(FIRST_FREE_CHUNK_LIST + list_index) as usize] = chunk_location;
+    }
+
+    fn remove_from_free_chunk_list(
+        &mut self,
+        segment: u8,
+        size: u16,
+    ) -> Result<u16, ObjectMemoryError> {
+        // determine which list to remove from
+        let list_index = min(size, BIG_SIZE);
+        // get current head
+        let target_chunk =
+            self.heap[segment as usize][(FIRST_FREE_CHUNK_LIST + list_index) as usize];
+        if target_chunk == NON_POINTER {
+            return Err(ObjectMemoryError::NoFreeEntries);
+        }
+        // advance to next chunk
+        let next_chunk = self.heap[segment as usize][(target_chunk + 1) as usize];
+        self.heap[segment as usize][(FIRST_FREE_CHUNK_LIST + list_index) as usize] = next_chunk;
+        return Ok(target_chunk);
+    }
 }
 
 #[cfg(test)]
 mod heap_accessor_tests {
+    use crate::globalconstants::NON_POINTER;
+
     use super::*;
 
     fn dummy_memory() -> ObjectMemory {
         let mut mem = ObjectMemory {
             heap: vec![vec![0u16; 64]],
             object_table: vec![0u16; 64],
+            free_pointer_list: NON_POINTER,
+            current_segment: 0,
         };
         // OOP 0: segment 0, location 10
         mem.object_table[0] = 0x0000;
@@ -417,6 +555,102 @@ mod heap_accessor_tests {
         let mut memory = dummy_memory();
         memory.class_bits_of_put(OOP::from_raw(0), 0xABCD);
         assert_eq!(memory.heap[0][11], 0xABCD);
+    }
+}
+
+#[cfg(test)]
+mod heap_free_chunk_tests {
+    use crate::globalconstants::{BIG_SIZE, FIRST_FREE_CHUNK_LIST, NON_POINTER};
+
+    use super::*;
+
+    fn dummy_memory() -> ObjectMemory {
+        let mut mem = ObjectMemory {
+            heap: vec![vec![NON_POINTER; 64]],
+            object_table: vec![0u16; 64],
+            free_pointer_list: NON_POINTER,
+            current_segment: 0,
+        };
+        // initialize free chunk list heads to NON_POINTER (empty)
+        for i in 0..=(BIG_SIZE as usize) {
+            mem.heap[0][(FIRST_FREE_CHUNK_LIST as usize) + i] = NON_POINTER;
+        }
+        return mem;
+    }
+
+    #[test]
+    fn add_chunk_to_empty_list() {
+        let mut memory = dummy_memory();
+        memory.to_free_chunk_list_add(0, 4, 30);
+        // list head for size 4 should point to chunk at 30
+        assert_eq!(memory.heap[0][(FIRST_FREE_CHUNK_LIST + 4) as usize], 30);
+        // chunk's size field
+        assert_eq!(memory.heap[0][30], 4);
+        // chunk's next pointer should be NON_POINTER (was empty)
+        assert_eq!(memory.heap[0][31], NON_POINTER);
+    }
+
+    #[test]
+    fn add_multiple_chunks_to_same_list() {
+        let mut memory = dummy_memory();
+        memory.to_free_chunk_list_add(0, 4, 30);
+        memory.to_free_chunk_list_add(0, 4, 40);
+        // head should point to most recently added
+        assert_eq!(memory.heap[0][(FIRST_FREE_CHUNK_LIST + 4) as usize], 40);
+        // chain: 40 -> 30 -> NON_POINTER
+        assert_eq!(memory.heap[0][41], 30);
+        assert_eq!(memory.heap[0][31], NON_POINTER);
+    }
+
+    #[test]
+    fn add_big_chunk_goes_to_big_list() {
+        let mut memory = dummy_memory();
+        memory.to_free_chunk_list_add(0, 25, 30);
+        // should go to BIG_SIZE list, not size 25
+        assert_eq!(
+            memory.heap[0][(FIRST_FREE_CHUNK_LIST + BIG_SIZE) as usize],
+            30
+        );
+        // but size field should still be 25 (actual size)
+        assert_eq!(memory.heap[0][30], 25);
+    }
+
+    #[test]
+    fn remove_chunk_from_list() {
+        let mut memory = dummy_memory();
+        memory.to_free_chunk_list_add(0, 4, 30);
+        memory.to_free_chunk_list_add(0, 4, 40);
+        let result = memory.remove_from_free_chunk_list(0, 4);
+        assert_eq!(result, Ok(40));
+        // head should now point to 30
+        assert_eq!(memory.heap[0][(FIRST_FREE_CHUNK_LIST + 4) as usize], 30);
+    }
+
+    #[test]
+    fn remove_until_empty() {
+        let mut memory = dummy_memory();
+        memory.to_free_chunk_list_add(0, 4, 30);
+        memory.to_free_chunk_list_add(0, 4, 40);
+        assert_eq!(memory.remove_from_free_chunk_list(0, 4), Ok(40));
+        assert_eq!(memory.remove_from_free_chunk_list(0, 4), Ok(30));
+        assert!(memory.remove_from_free_chunk_list(0, 4).is_err());
+    }
+
+    #[test]
+    fn remove_from_empty_list_returns_error() {
+        let mut memory = dummy_memory();
+        assert!(memory.remove_from_free_chunk_list(0, 4).is_err());
+    }
+
+    #[test]
+    fn different_sizes_use_different_lists() {
+        let mut memory = dummy_memory();
+        memory.to_free_chunk_list_add(0, 4, 30);
+        memory.to_free_chunk_list_add(0, 6, 40);
+        // removing size 4 should give 30, not 40
+        assert_eq!(memory.remove_from_free_chunk_list(0, 4), Ok(30));
+        // removing size 6 should give 40
+        assert_eq!(memory.remove_from_free_chunk_list(0, 6), Ok(40));
     }
 }
 
@@ -555,12 +789,16 @@ impl ObjectMemory {
 
 #[cfg(test)]
 mod api_accessor_tests {
+    use crate::globalconstants::NON_POINTER;
+
     use super::*;
 
     fn dummy_memory() -> ObjectMemory {
         let mut mem = ObjectMemory {
             heap: vec![vec![0u16; 64]; 3],
             object_table: vec![0u16; 64],
+            free_pointer_list: NON_POINTER,
+            current_segment: 0,
         };
 
         // OOP 0: segment 0, location 10
@@ -657,5 +895,252 @@ mod api_accessor_tests {
             mem.fetch_class_of(OOP::from_raw(1)),
             CLASS_SMALL_INTEGER_POINTER
         );
+    }
+}
+
+// ====================================
+//  Allocator Functionality
+// ====================================
+
+impl ObjectMemory {
+    fn attempt_to_allocate_chunk_in_current_segment(
+        &mut self,
+        size: u16,
+    ) -> Result<u16, ObjectMemoryError> {
+        let seg = self.current_segment as usize;
+
+        // Attempt to allocate in the 'fitting' list first.
+        if size < BIG_SIZE {
+            // Try the 'fitting' list
+            if let Ok(location) = self.remove_from_free_chunk_list(self.current_segment, size) {
+                return Ok(location);
+            }
+            // Fall through if allocation was not possible
+        }
+
+        // Allocate a chunk in the big list
+        let big_list_index = (FIRST_FREE_CHUNK_LIST + BIG_SIZE) as usize;
+        // Start at the 'top' of the list, if empty current == NON_POINTER
+        let mut current = self.heap[seg][big_list_index];
+        // Since we start at the 'top' of the list, the previous entry is None
+        let mut prev_location: Option<u16> = None;
+
+        while current != NON_POINTER {
+            let chunk_size = self.heap[seg][current as usize];
+            if chunk_size >= size {
+                // we found a match, unlink it from the list
+                let next = self.heap[seg][(current + 1) as usize];
+                match prev_location {
+                    // If we were at the top, set the 'top' of the list, to the next entry
+                    // -> removing the top, so this item in the process
+                    None => self.heap[seg][big_list_index] = next,
+                    // If we're in the middle of the list, set the next item of the previous item
+                    // to this item's next item, removing this item from the chain
+                    Some(prev) => self.heap[seg][(prev + 1) as usize] = next,
+                }
+
+                // split the remainder size if it makes sense (compact if remainder > HEADER_SIZE)
+                let remainder = chunk_size - size;
+                if remainder >= HEADER_SIZE {
+                    // the remainder starts after our chunk ends, so after size words
+                    let remainder_location = current + size;
+                    // free the remainder again with the usual logic
+                    self.to_free_chunk_list_add(
+                        self.current_segment,
+                        remainder,
+                        remainder_location,
+                    );
+                }
+                // we found a chunk, return it
+                return Ok(current);
+            }
+
+            // set iteration variables and continue iterating
+            prev_location = Some(current);
+            current = self.heap[seg][(current + 1) as usize];
+        }
+
+        // we found no applicable chunk
+        return Err(ObjectMemoryError::NoFreeEntries);
+    }
+
+    /// Fetch a free pointer and return a new 'fresh' object
+    ///
+    /// Parameters:
+    ///     - size: the size of the new object (number of fields)
+    ///     - location: the 'requested' location for the new object
+    ///
+    /// Returns:
+    ///     - Pointer to the new object
+    ///     - ObjectMemoryError if no free memory is available
+    fn obtain_pointer(&mut self, size: u16, location: u16) -> Result<OOP, ObjectMemoryError> {
+        let oop = self.remove_from_free_pointer_list()?;
+        self.segment_bits_of_put(oop, self.current_segment);
+        self.location_bits_of_put(oop, location);
+        self.size_bits_of_put(oop, size);
+        return Ok(oop);
+    }
+
+    /// 'Removes' the object from memory
+    ///
+    /// Parameters:
+    ///     - oop: The pointer to the object that shall be erased
+    fn deallocate(&mut self, oop: OOP) {
+        let size = self.size_bits_of(oop);
+        let loc = self.location_bits_of(oop);
+        let seg = self.segment_bits_of(oop);
+        self.to_free_pointer_list_add(oop);
+        self.to_free_chunk_list_add(seg, size, loc);
+    }
+}
+
+#[cfg(test)]
+mod allocator_tests {
+    use crate::globalconstants::{BIG_SIZE, FIRST_FREE_CHUNK_LIST, HEADER_SIZE, NON_POINTER};
+
+    use super::*;
+
+    fn dummy_memory() -> ObjectMemory {
+        let mut mem = ObjectMemory {
+            heap: vec![vec![NON_POINTER; 256]],
+            object_table: vec![0u16; 64],
+            free_pointer_list: NON_POINTER,
+            current_segment: 0,
+        };
+        // initialize free chunk list heads to NON_POINTER (empty)
+        for i in 0..=(BIG_SIZE as usize) {
+            mem.heap[0][(FIRST_FREE_CHUNK_LIST as usize) + i] = NON_POINTER;
+        }
+        return mem;
+    }
+
+    // ┌──────────────────────────────────────────────────────┐
+    // │  attempt_to_allocate_chunk_in_current_segment tests  │
+    // └──────────────────────────────────────────────────────┘
+
+    #[test]
+    fn allocate_chunk_exact_fit() {
+        let mut memory = dummy_memory();
+        // add a free chunk of size 4 at location 30
+        memory.to_free_chunk_list_add(0, 4, 30);
+        let result = memory.attempt_to_allocate_chunk_in_current_segment(4);
+        assert_eq!(result, Ok(30));
+    }
+
+    #[test]
+    fn allocate_chunk_from_big_list() {
+        let mut memory = dummy_memory();
+        // add a free chunk of size 25 at location 40
+        memory.to_free_chunk_list_add(0, 25, 40);
+        let result = memory.attempt_to_allocate_chunk_in_current_segment(25);
+        assert_eq!(result, Ok(40));
+    }
+
+    #[test]
+    fn allocate_chunk_splits_big_chunk() {
+        let mut memory = dummy_memory();
+        // add a free chunk of size 30 at location 30 (goes to big list)
+        memory.to_free_chunk_list_add(0, 30, 30);
+        // request size 4 — should split, returning the lower part
+        let result = memory.attempt_to_allocate_chunk_in_current_segment(4);
+        assert_eq!(result, Ok(30));
+        // remainder (size 26) should be on the big free list
+        assert_eq!(memory.heap[0][(FIRST_FREE_CHUNK_LIST + BIG_SIZE) as usize], 34);
+        assert_eq!(memory.heap[0][34], 26); // remainder size
+    }
+
+    #[test]
+    fn allocate_chunk_no_split_when_remainder_too_small() {
+        let mut memory = dummy_memory();
+        // add a free chunk of size 5 at location 30
+        memory.to_free_chunk_list_add(0, 5, 30);
+        // request size 4 — remainder would be 1, less than HEADER_SIZE, so no split
+        let result = memory.attempt_to_allocate_chunk_in_current_segment(5);
+        assert_eq!(result, Ok(30));
+    }
+
+    #[test]
+    fn allocate_chunk_falls_through_to_big_list() {
+        let mut memory = dummy_memory();
+        // no exact-fit list for size 4, but a big chunk exists
+        memory.to_free_chunk_list_add(0, 22, 50);
+        let result = memory.attempt_to_allocate_chunk_in_current_segment(4);
+        assert_eq!(result, Ok(50));
+        // remainder (size 18) should be on the free list
+        assert_eq!(memory.heap[0][(FIRST_FREE_CHUNK_LIST + 18) as usize], 54);
+    }
+
+    #[test]
+    fn allocate_chunk_returns_error_when_empty() {
+        let mut memory = dummy_memory();
+        let result = memory.attempt_to_allocate_chunk_in_current_segment(4);
+        assert!(result.is_err());
+    }
+
+    // ┌──────────────────────────────┐
+    // │     obtain_pointer tests     │
+    // └──────────────────────────────┘
+
+    #[test]
+    fn obtain_pointer_sets_up_ot_entry() {
+        let mut memory = dummy_memory();
+        // add a free OT entry
+        memory.to_free_pointer_list_add(OOP::from_raw(4));
+        let result = memory.obtain_pointer(6, 30);
+        assert!(result.is_ok());
+        let oop = result.unwrap();
+        assert_eq!(oop, OOP::from_raw(4));
+        assert_eq!(memory.size_bits_of(oop), 6);
+        assert_eq!(memory.segment_bits_of(oop), 0); // current_segment
+        assert_eq!(memory.location_bits_of(oop), 30);
+        assert!(!memory.free_bit_of(oop));
+    }
+
+    #[test]
+    fn obtain_pointer_returns_error_when_no_free_entries() {
+        let mut memory = dummy_memory();
+        let result = memory.obtain_pointer(6, 30);
+        assert!(result.is_err());
+    }
+
+    // ┌──────────────────────────────┐
+    // │      deallocate tests        │
+    // └──────────────────────────────┘
+
+    #[test]
+    fn deallocate_frees_ot_entry_and_heap_chunk() {
+        let mut memory = dummy_memory();
+        // set up a live object: OOP 4, segment 0, location 30, size 6
+        memory.object_table[4] = 0x0000; // count=0, segment=0
+        memory.object_table[5] = 30; // location=30
+        memory.heap[0][30] = 6; // size
+        memory.heap[0][31] = 0x0020; // class
+
+        memory.deallocate(OOP::from_raw(4));
+
+        // OT entry should be on free pointer list
+        assert!(memory.free_bit_of(OOP::from_raw(4)));
+        assert_eq!(memory.free_pointer_list, 4);
+        // heap chunk should be on free chunk list for size 6
+        assert_eq!(memory.heap[0][(FIRST_FREE_CHUNK_LIST + 6) as usize], 30);
+    }
+
+    #[test]
+    fn deallocate_then_reallocate() {
+        let mut memory = dummy_memory();
+        // set up a live object: OOP 4, segment 0, location 30, size 6
+        memory.object_table[4] = 0x0000;
+        memory.object_table[5] = 30;
+        memory.heap[0][30] = 6;
+        memory.heap[0][31] = 0x0020;
+
+        memory.deallocate(OOP::from_raw(4));
+
+        // should be able to get the OT entry back
+        let oop = memory.remove_from_free_pointer_list();
+        assert_eq!(oop, Ok(OOP::from_raw(4)));
+        // should be able to get the chunk back
+        let chunk = memory.remove_from_free_chunk_list(0, 6);
+        assert_eq!(chunk, Ok(30));
     }
 }

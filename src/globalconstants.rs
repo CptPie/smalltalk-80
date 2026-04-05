@@ -64,3 +64,12 @@ pub const CANNOT_RETURN_SELECTOR: u16 = 0x2C;
 
 /// Selector for #mustBeBoolean
 pub const MUST_BE_BOOLEAN_SELECTOR: u16 = 0x34;
+
+// Allocation variables
+pub const NON_POINTER: u16 = 0xFFFF;
+
+pub const BIG_SIZE: u16 = 20;
+pub const FIRST_FREE_CHUNK_LIST: u16 = 0;
+
+// FIRST_FREE_CHUNK_LIST + BIG_SIZE
+pub const LAST_BIG_CHUNK_LIST: u16 = 20;

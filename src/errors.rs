@@ -5,6 +5,7 @@ pub enum ObjectMemoryError {
     InvalidSmallIntegerAccess,
     NotInteger,
     NotInIntegerRange,
+    NoFreeEntries,
 }
 
 impl fmt::Display for ObjectMemoryError {
@@ -18,6 +19,7 @@ impl fmt::Display for ObjectMemoryError {
                 f,
                 "Value is outside of the SmallInteger range (-2^15..2^15-1)"
             ),
+            Self::NoFreeEntries => write!(f, "No free entries remaining in free pointer list"),
         }
     }
 }
