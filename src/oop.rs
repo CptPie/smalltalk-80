@@ -9,34 +9,44 @@ pub struct OOP {
 
 impl OOP {
     /// Create a new OOP object from a raw memory value, no verification.
+    ///
+    /// # Parameters:
+    ///     * value (u16): The raw 16-bit value to wrap
+    ///
+    /// # Returns:
+    ///     * OOP, the new object pointer
     pub fn from_raw(value: u16) -> OOP {
         OOP { value }
     }
 
-    /// Checks if an object pointer points to an object or an integer value
-    /// returns true if it is an object pointer
-    /// returns false if it is an integer value
+    /// Checks if an object pointer points to an object or an integer value.
     ///
-    /// see Bluebook p. 660
-    ///
-    /// isIntegerObject: objectPointer
-    ///   ↑(objectPointer bitAnd: 1) = 1
-    ///
+    /// # Returns:
+    ///     * bool, true if the OOP encodes an integer, false if it is an object pointer
+    //
+    //  see Bluebook p. 660
+    //
+    //  isIntegerObject: objectPointer
+    //    ↑(objectPointer bitAnd: 1) = 1
+    //
     pub fn is_integer_object(&self) -> bool {
         return (self.value & 0x1) == 1;
     }
 
-    /// Validates an OOP to be an object.
-    /// returns the object value if it is an object (unmodified so the low bit is always 0)
-    ///      This aspect is not part of the specification but makes more sense in my opinion
-    /// returns ObjectMemoryError::InvalidSmallIntegerAccess errors if the OOP points to an integer
+    /// Validates an OOP to be an object, not a SmallInteger.
     ///
-    /// see Bluebook p. 661
-    ///
-    /// cantBeIntegerObject: objectPointer
-    ///   (self isIntegerObject: objectPointer)
-    ///     ifTrue: [Sensor notify: `A small integer has no object table entry`]
-    ///
+    /// # Returns:
+    ///     * Result<u16, ObjectMemoryError>, the object value if it is an object (unmodified
+    ///       so the low bit is always 0), or InvalidSmallIntegerAccess if it is an integer
+    ///       (Note: Returning the Object is not part of the specification but makes more sense
+    ///       in my opinion.)
+    //
+    //  see Bluebook p. 661
+    //
+    //  cantBeIntegerObject: objectPointer
+    //    (self isIntegerObject: objectPointer)
+    //      ifTrue: [Sensor notify: `A small integer has no object table entry`]
+    //
     fn cant_be_integer_object(&self) -> Result<u16, ObjectMemoryError> {
         if self.is_integer_object() {
             return Err(ObjectMemoryError::InvalidSmallIntegerAccess);
@@ -45,15 +55,17 @@ impl OOP {
         }
     }
 
-    /// Access the integer value of the OOP
-    /// returns the integer value if OOP represents an integer
-    /// returns ObjectMemoryError::NotInteger if it represents an object pointer
+    /// Access the integer value of the OOP.
     ///
-    /// see Bluebook p. 688
-    ///
-    /// integerValueOf: objectPointer
-    ///   ↑objectPointer/2
-    ///
+    /// # Returns:
+    ///     * Result<i16, ObjectMemoryError>, the integer value if OOP represents an integer,
+    ///       or NotInteger if it represents an object pointer
+    //
+    //  see Bluebook p. 688
+    //
+    //  integerValueOf: objectPointer
+    //    ↑objectPointer/2
+    //
     pub fn integer_value_of(&self) -> Result<i16, ObjectMemoryError> {
         if self.is_integer_object() {
             return Ok((self.value as i16) >> 1);
@@ -62,30 +74,37 @@ impl OOP {
         }
     }
 
-    /// Verifies the requested value to be within the SmallInteger range
-    /// (-2^15 .. 2^15-1)
-    /// returns true if the value is in the correct range
-    /// returns false if it falls outside
+    /// Verifies the requested value to be within the SmallInteger range (-16384..16383).
     ///
-    /// see Bluebook p. 688 (note that there are typos and logic errors)
+    /// # Parameters:
+    ///     * value (i16): The value to check
     ///
-    /// integerValue: valueWord
-    ///   ↑valueWord <= -16384 and: [valueWord > 16834]
-    ///
+    /// # Returns:
+    ///     * bool, true if the value is in the correct range, false if it falls outside
+    //
+    //  see Bluebook p. 688 (note that there are typos and logic errors)
+    //
+    //  integerValue: valueWord
+    //    ↑valueWord <= -16384 and: [valueWord > 16834]
+    //
     pub fn is_integer_value(value: i16) -> bool {
         return value >= -16384 && value < 16384;
     }
 
-    /// Converts a integer value to an OOP object
+    /// Converts an integer value to an OOP object.
     ///
-    /// returns the OOP object if the value could be converted
-    /// returns ObjectMemoryError::NotInIntegerRange error otherwise
+    /// # Parameters:
+    ///     * value (i16): The integer value to encode
     ///
-    /// see Bluebook p. 688
-    ///
-    /// integerObjectOf: value
-    ///   ↑(value bitShift: 1) + 1
-    ///
+    /// # Returns:
+    ///     * Result<OOP, ObjectMemoryError>, the encoded OOP if the value is in range,
+    ///       or NotInIntegerRange otherwise
+    //
+    //  see Bluebook p. 688
+    //
+    //  integerObjectOf: value
+    //    ↑(value bitShift: 1) + 1
+    //
     pub fn integer_object_of(value: i16) -> Result<OOP, ObjectMemoryError> {
         if Self::is_integer_value(value) {
             return Ok(OOP {

@@ -99,31 +99,109 @@ impl ObjectMemory {
     // │       GETTERS       │
     // └─────────────────────┘
 
+    /// Returns the 8-bit reference count from the object table entry.
+    ///
+    /// # Parameters:
+    ///     * oop (OOP): The object pointer to query
+    ///
+    /// # Returns:
+    ///     * u8, the reference count
+    //
+    //  see Bluebook p. 662
+    //
+    //  countBitsOf: objectPointer
+    //    ↑self ot: objectPointer bits: 0 to: 7
+    //
     fn count_bits_of(&self, oop: OOP) -> u8 {
         let word0 = self.object_table[oop.value as usize];
         return (word0 >> 8) as u8;
     }
 
+    /// Returns the odd-length bit, indicating if a nonpointer object has an odd byte count.
+    ///
+    /// # Parameters:
+    ///     * oop (OOP): The object pointer to query
+    ///
+    /// # Returns:
+    ///     * bool, true if the object has an odd byte count
+    //
+    //  see Bluebook p. 662
+    //
+    //  oddBitOf: objectPointer
+    //    ↑self ot: objectPointer bits: 8 to: 8
+    //
     fn odd_bit_of(&self, oop: OOP) -> bool {
         let word0 = self.object_table[oop.value as usize];
         return (word0 >> 7) & 1 == 1;
     }
 
+    /// Returns the pointer-fields bit. True if the object's data fields contain object pointers.
+    ///
+    /// # Parameters:
+    ///     * oop (OOP): The object pointer to query
+    ///
+    /// # Returns:
+    ///     * bool, true if the fields of the object contain object pointers
+    //
+    //  see Bluebook p. 662
+    //
+    //  pointerBitOf: objectPointer
+    //    ↑self ot: objectPointer bits: 9 to: 9
+    //
     fn pointer_bit_of(&self, oop: OOP) -> bool {
         let word0 = self.object_table[oop.value as usize];
         return (word0 >> 6) & 1 == 1;
     }
 
+    /// Returns the free-entry bit. True if this object table entry is unused.
+    ///
+    /// # Parameters:
+    ///     * oop (OOP): The object pointer to query
+    ///
+    /// # Returns:
+    ///     * bool, true if this object table entry is free
+    //
+    //  see Bluebook p. 662
+    //
+    //  freeBitOf: objectPointer
+    //    ↑self ot: objectPointer bits: 10 to: 10
+    //
     fn free_bit_of(&self, oop: OOP) -> bool {
         let word0 = self.object_table[oop.value as usize];
         return (word0 >> 5) & 1 == 1;
     }
 
+    /// Returns the 4-bit heap segment index from the object table entry.
+    ///
+    /// # Parameters:
+    ///     * oop (OOP): The object pointer to query
+    ///
+    /// # Returns:
+    ///     * u8, the heap segment index (0-15)
+    //
+    //  see Bluebook p. 662
+    //
+    //  segmentBitsOf: objectPointer
+    //    ↑self ot: objectPointer bits: 12 to: 15
+    //
     fn segment_bits_of(&self, oop: OOP) -> u8 {
         let word0 = self.object_table[oop.value as usize];
         return (word0 & 0xF) as u8;
     }
 
+    /// Returns the 16-bit heap location (word address) from the object table entry.
+    ///
+    /// # Parameters:
+    ///     * oop (OOP): The object pointer to query
+    ///
+    /// # Returns:
+    ///     * u16, the word address within the heap segment
+    //
+    //  see Bluebook p. 662-663
+    //
+    //  locationBitsOf: objectPointer
+    //    ↑self ot: objectPointer + 1
+    //
     fn location_bits_of(&self, oop: OOP) -> u16 {
         return self.object_table[(oop.value + 1) as usize];
     }
@@ -132,12 +210,34 @@ impl ObjectMemory {
     // │       SETTERS       │
     // └─────────────────────┘
 
+    /// Sets the 8-bit reference count in the object table entry.
+    ///
+    /// # Parameters:
+    ///     * oop (OOP): The object pointer to modify
+    ///     * new_count (u8): The new reference count value
+    //
+    //  see Bluebook p. 662
+    //
+    //  countBitsOf: objectPointer put: value
+    //    self ot: objectPointer bits: 0 to: 7 put: value
+    //
     fn count_bits_of_put(&mut self, oop: OOP, new_count: u8) {
         let mut word0 = self.object_table[oop.value as usize];
         word0 = (word0 & 0x00FF) | ((new_count as u16) << 8); // clear old count, set new
         self.object_table[oop.value as usize] = word0
     }
 
+    /// Sets the odd-length bit in the object table entry.
+    ///
+    /// # Parameters:
+    ///     * oop (OOP): The object pointer to modify
+    ///     * new_bit (bool): The new odd-length bit value
+    //
+    //  see Bluebook p. 662
+    //
+    //  oddBitOf: objectPointer put: value
+    //    self ot: objectPointer bits: 8 to: 8 put: value
+    //
     fn odd_bit_of_put(&mut self, oop: OOP, new_bit: bool) {
         let mut word0 = self.object_table[oop.value as usize];
         word0 = word0 & 0xFF7F;
@@ -147,6 +247,17 @@ impl ObjectMemory {
         self.object_table[oop.value as usize] = word0
     }
 
+    /// Sets the pointer-fields bit in the object table entry.
+    ///
+    /// # Parameters:
+    ///     * oop (OOP): The object pointer to modify
+    ///     * new_bit (bool): The new pointer-fields bit value
+    //
+    //  see Bluebook p. 662
+    //
+    //  pointerBitOf: objectPointer put: value
+    //    self ot: objectPointer bits: 9 to: 9 put: value
+    //
     fn pointer_bit_of_put(&mut self, oop: OOP, new_bit: bool) {
         let mut word0 = self.object_table[oop.value as usize];
         word0 = word0 & 0xFFBF;
@@ -156,6 +267,17 @@ impl ObjectMemory {
         self.object_table[oop.value as usize] = word0
     }
 
+    /// Sets the free-entry bit in the object table entry.
+    ///
+    /// # Parameters:
+    ///     * oop (OOP): The object pointer to modify
+    ///     * new_bit (bool): The new free-entry bit value
+    //
+    //  see Bluebook p. 662
+    //
+    //  freeBitOf: objectPointer put: value
+    //    self ot: objectPointer bits: 10 to: 10 put: value
+    //
     fn free_bit_of_put(&mut self, oop: OOP, new_bit: bool) {
         let mut word0 = self.object_table[oop.value as usize];
         word0 = word0 & 0xFFDF;
@@ -165,22 +287,71 @@ impl ObjectMemory {
         self.object_table[oop.value as usize] = word0
     }
 
+    /// Sets the 4-bit heap segment index in the object table entry.
+    ///
+    /// # Parameters:
+    ///     * oop (OOP): The object pointer to modify
+    ///     * new_segment (u8): The new segment index (0-15)
+    //
+    //  see Bluebook p. 662
+    //
+    //  segmentBitsOf: objectPointer put: value
+    //    self ot: objectPointer bits: 12 to: 15 put: value
+    //
     fn segment_bits_of_put(&mut self, oop: OOP, new_segment: u8) {
         let mut word0 = self.object_table[oop.value as usize];
         word0 = (word0 & 0xFFF0) | (new_segment as u16) & 0x000F;
         self.object_table[oop.value as usize] = word0
     }
 
+    /// Sets the 16-bit heap location (word address) in the object table entry.
+    ///
+    /// # Parameters:
+    ///     * oop (OOP): The object pointer to modify
+    ///     * new_location (u16): The new word address within the heap segment
+    //
+    //  see Bluebook p. 663
+    //
+    //  locationBitsOf: objectPointer put: value
+    //    self ot: objectPointer + 1 put: value
+    //
     fn location_bits_of_put(&mut self, oop: OOP, new_location: u16) {
         self.object_table[(oop.value + 1) as usize] = new_location
     }
 
+    /// Adds a free object table entry to the head of the free pointer list.
+    ///
+    /// # Parameters:
+    ///     * oop (OOP): The object pointer to add to the free list
+    //
+    //  see Bluebook p. 666
+    //
+    //  toFreePointerListAdd: objectPointer
+    //    self locationBitsOf: objectPointer
+    //      put: (self headOfFreePointerList).
+    //    self headOfFreePointerListPut: objectPointer
+    //
     fn to_free_pointer_list_add(&mut self, oop: OOP) {
         self.free_bit_of_put(oop, true);
         self.location_bits_of_put(oop, self.free_pointer_list);
         self.free_pointer_list = oop.value;
     }
 
+    /// Removes and returns the first free entry from the free pointer list.
+    ///
+    /// # Returns:
+    ///     * Result<OOP, ObjectMemoryError>, the reclaimed object pointer,
+    ///       or NoFreeEntries if the list is empty
+    //
+    //  see Bluebook p. 666
+    //
+    //  removeFromFreePointerList
+    //    | objectPointer |
+    //    objectPointer ← self headOfFreePointerList.
+    //    objectPointer = NonPointer ifTrue: [↑nil].
+    //    self headOfFreePointerListPut: (self locationBitsOf: objectPointer).
+    //    ↑objectPointer
+    //
     fn remove_from_free_pointer_list(&mut self) -> Result<OOP, ObjectMemoryError> {
         let head = self.free_pointer_list;
         if head == NON_POINTER {
@@ -419,17 +590,62 @@ impl ObjectMemory {
     // we work with heap memory here, so we have to resolve the object pointers
     // to find out the location of the object
 
+    /// Reads a word from an object's heap chunk at the given word offset.
+    ///
+    /// # Parameters:
+    ///     * oop (OOP): The object pointer
+    ///     * word_index (u16): The word offset within the heap chunk
+    ///
+    /// # Returns:
+    ///     * u16, the word value at the given offset
+    //
+    //  see Bluebook p. 663
+    //
+    //  heapChunkOf: objectPointer word: offset
+    //    ↑wordMemory segment: (self segmentBitsOf: objectPointer)
+    //      word: ((self locationBitsOf: objectPointer) + offset)
+    //
     fn heap_chunk_of_word(&self, oop: OOP, word_index: u16) -> u16 {
         let seg = self.segment_bits_of(oop) as usize;
         let loc = self.location_bits_of(oop) as usize;
         return self.heap[seg][loc + word_index as usize];
     }
+    /// Writes a word into an object's heap chunk at the given word offset.
+    ///
+    /// # Parameters:
+    ///     * oop (OOP): The object pointer
+    ///     * word_index (u16): The word offset within the heap chunk
+    ///     * value (u16): The word value to write
+    //
+    //  see Bluebook p. 663
+    //
+    //  heapChunkOf: objectPointer word: offset put: value
+    //    ↑wordMemory segment: (self segmentBitsOf: objectPointer)
+    //      word: ((self locationBitsOf: objectPointer) + offset)
+    //      put: value
+    //
     fn heap_chunk_of_word_put(&mut self, oop: OOP, word_index: u16, value: u16) {
         let seg = self.segment_bits_of(oop) as usize;
         let loc = self.location_bits_of(oop) as usize;
         self.heap[seg][loc + word_index as usize] = value;
     }
 
+    /// Reads a byte from an object's heap chunk at the given byte offset.
+    ///
+    /// # Parameters:
+    ///     * oop (OOP): The object pointer
+    ///     * byte_index (u16): The byte offset within the heap chunk
+    ///
+    /// # Returns:
+    ///     * u8, the byte value at the given offset
+    //
+    //  see Bluebook p. 663
+    //
+    //  heapChunkOf: objectPointer byte: offset
+    //    ↑wordMemory segment: (self segmentBitsOf: objectPointer)
+    //      word: ((self locationBitsOf: objectPointer) + (offset//2))
+    //      byte: (offset\\2)
+    //
     fn heap_chunk_of_byte(&self, oop: OOP, byte_index: u16) -> u8 {
         let seg = self.segment_bits_of(oop) as usize;
         let loc = self.location_bits_of(oop) as usize;
@@ -444,6 +660,20 @@ impl ObjectMemory {
         }
     }
 
+    /// Writes a byte into an object's heap chunk at the given byte offset.
+    ///
+    /// # Parameters:
+    ///     * oop (OOP): The object pointer
+    ///     * byte_index (u16): The byte offset within the heap chunk
+    ///     * value (u8): The byte value to write
+    //
+    //  see Bluebook p. 663
+    //
+    //  heapChunkOf: objectPointer byte: offset put: value
+    //    ↑wordMemory segment: (self segmentBitsOf: objectPointer)
+    //      word: ((self locationBitsOf: objectPointer) + (offset//2))
+    //      byte: (offset\\2) put: value
+    //
     fn heap_chunk_of_byte_put(&mut self, oop: OOP, byte_index: u16, value: u8) {
         let seg = self.segment_bits_of(oop) as usize;
         let loc = self.location_bits_of(oop) as usize;
@@ -461,18 +691,66 @@ impl ObjectMemory {
         self.heap[seg][loc + (byte_index / 2) as usize] = word;
     }
 
+    /// Returns the size field (word 0) of the object's heap header.
+    ///
+    /// # Parameters:
+    ///     * oop (OOP): The object pointer to query
+    ///
+    /// # Returns:
+    ///     * u16, the total size of the heap chunk in words (including header)
+    //
+    //  see Bluebook p. 663
+    //
+    //  sizeBitsOf: objectPointer
+    //    ↑self heapChunkOf: objectPointer word: 0
+    //
     fn size_bits_of(&self, oop: OOP) -> u16 {
         return self.heap_chunk_of_word(oop, 0);
     }
 
+    /// Sets the size field (word 0) of the object's heap header.
+    ///
+    /// # Parameters:
+    ///     * oop (OOP): The object pointer to modify
+    ///     * value (u16): The new size in words (including header)
+    //
+    //  see Bluebook p. 663
+    //
+    //  sizeBitsOf: objectPointer put: value
+    //    self heapChunkOf: objectPointer word: 0 put: value
+    //
     fn size_bits_of_put(&mut self, oop: OOP, value: u16) {
         self.heap_chunk_of_word_put(oop, 0, value);
     }
 
+    /// Returns the class field (word 1) of the object's heap header.
+    ///
+    /// # Parameters:
+    ///     * oop (OOP): The object pointer to query
+    ///
+    /// # Returns:
+    ///     * u16, the class pointer from the heap header
+    //
+    //  see Bluebook p. 663
+    //
+    //  classBitsOf: objectPointer
+    //    ↑self heapChunkOf: objectPointer word: 1
+    //
     fn class_bits_of(&self, oop: OOP) -> u16 {
         return self.heap_chunk_of_word(oop, 1);
     }
 
+    /// Sets the class field (word 1) of the object's heap header.
+    ///
+    /// # Parameters:
+    ///     * oop (OOP): The object pointer to modify
+    ///     * value (u16): The new class pointer
+    //
+    //  see Bluebook p. 663
+    //
+    //  classBitsOf: objectPointer put: value
+    //    self heapChunkOf: objectPointer word: 1 put: value
+    //
     fn class_bits_of_put(&mut self, oop: OOP, value: u16) {
         self.heap_chunk_of_word_put(oop, 1, value);
     }
@@ -486,6 +764,24 @@ impl ObjectMemory {
     // chunk is written to word 0 (as a double reference which list it is a part of [remember lists
     // are determined by size]).
 
+    /// Adds a freed heap chunk to the appropriate size-indexed free chunk list.
+    ///
+    /// # Parameters:
+    ///     * segment (u8): The heap segment containing the chunk
+    ///     * size (u16): The size of the chunk in words
+    ///     * chunk_location (u16): The word address of the chunk within the segment
+    //
+    //  see Bluebook p. 666
+    //
+    //  toFreeChunkList: size add: objectPointer
+    //    | segment |
+    //    segment ← self segmentBitsOf: objectPointer.
+    //    self classBitsOf: objectPointer
+    //      put: (self headOfFreeChunkList: size inSegment: segment).
+    //    self headOfFreeChunkList: size
+    //      inSegment: segment
+    //      put: objectPointer
+    //
     fn to_free_chunk_list_add(&mut self, segment: u8, size: u16, chunk_location: u16) {
         // determine which list to insert into
         let list_index = min(size, BIG_SIZE);
@@ -498,6 +794,29 @@ impl ObjectMemory {
         self.heap[segment as usize][(FIRST_FREE_CHUNK_LIST + list_index) as usize] = chunk_location;
     }
 
+    /// Removes and returns the first chunk from the free chunk list of the given size.
+    ///
+    /// # Parameters:
+    ///     * segment (u8): The heap segment to search
+    ///     * size (u16): The desired chunk size in words
+    ///
+    /// # Returns:
+    ///     * Result<u16, ObjectMemoryError>, the chunk location,
+    ///       or NoFreeEntries if the list is empty
+    //
+    //  see Bluebook p. 666-667
+    //
+    //  removeFromFreeChunkList: size
+    //    | objectPointer secondChunk |
+    //    objectPointer ← self headOfFreeChunkList: size
+    //      inSegment: currentSegment.
+    //    objectPointer = NonPointer ifTrue: [↑nil].
+    //    secondChunk ← self classBitsOf: objectPointer.
+    //    self headOfFreeChunkList: size
+    //      inSegment: currentSegment
+    //      put: secondChunk.
+    //    ↑objectPointer
+    //
     fn remove_from_free_chunk_list(
         &mut self,
         segment: u8,
@@ -714,6 +1033,7 @@ mod heap_free_chunk_tests {
 //  Public facing API
 // ====================================
 
+/// Section: Public API
 impl ObjectMemory {
     // ┌─────────────────────┐
     // │   POINTER ACCESS    │
@@ -721,12 +1041,18 @@ impl ObjectMemory {
 
     /// Fetch a specific field of an object.
     ///
-    /// Parameters:
-    ///     - pointer: The pointer to the object
-    ///     - field_index: The 0 indexed field that shall be fetched
+    /// # Parameters:
+    ///     * pointer (u16): The pointer to the object
+    ///     * field_index (u16): The 0 indexed field that shall be fetched
     ///
-    /// Returns:
-    ///     - u16, the raw field data
+    /// # Returns:
+    ///     * u16, the raw field data
+    //
+    //  see Bluebook p. 686
+    //
+    //  fetchPointer: fieldIndex ofObject: objectPointer
+    //    ↑self heapChunkOf: objectPointer word: HeaderSize + fieldIndex
+    //
     pub fn fetch_pointer(&self, field_index: u16, pointer: OOP) -> u16 {
         return self.heap_chunk_of_word(pointer, HEADER_SIZE + field_index);
     }
@@ -735,10 +1061,20 @@ impl ObjectMemory {
     ///
     /// This also handles modifying all reference counts.
     ///
-    /// Parameters:
-    ///     - pointer: The pointer to the object
-    ///     - field_index: The 0 indexed field that the value shall be stored at
-    ///     - value: the value to be stored
+    /// # Parameters:
+    ///     * field_index (u16): The 0 indexed field that the value shall be stored at
+    ///     * pointer (OOP): The pointer to the object
+    ///     * value (u16): The value to be stored
+    //
+    //  see Bluebook p. 686
+    //
+    //  storePointer: fieldIndex ofObject: objectPointer withValue: valuePointer
+    //    | chunkIndex |
+    //    chunkIndex ← HeaderSize + fieldIndex.
+    //    self countUp: valuePointer.
+    //    self countDown: (self heapChunkOf: objectPointer word: chunkIndex).
+    //    ↑self heapChunkOf: objectPointer word: chunkIndex put: valuePointer
+    //
     pub fn store_pointer(&mut self, field_index: u16, pointer: OOP, value: u16) {
         let old_value = self.fetch_pointer(field_index, pointer);
         self.increase_references_to(OOP::from_raw(value));
@@ -752,44 +1088,71 @@ impl ObjectMemory {
 
     /// Fetch a specific word of an object, without accounting for the header offset.
     ///
-    /// Parameters:
-    ///     - pointer: The pointer to the object
-    ///     - word_index: The 0 indexed word that shall be fetched
+    /// # Parameters:
+    ///     * word_index (u16): The 0 indexed word that shall be fetched
+    ///     * pointer (OOP): The pointer to the object
     ///
-    /// Returns:
-    ///     - u16, the raw word data
+    /// # Returns:
+    ///     * u16, the raw word data
+    //
+    //  see Bluebook p. 686
+    //
+    //  fetchWord: wordIndex ofObject: objectPointer
+    //    ↑self heapChunkOf: objectPointer word: HeaderSize + wordIndex
+    //
     pub fn fetch_word(&self, word_index: u16, pointer: OOP) -> u16 {
         return self.heap_chunk_of_word(pointer, word_index);
     }
 
     /// Store a specific word of an object, without accounting for the header offset.
     ///
-    /// Parameters:
-    ///     - pointer: The pointer to the object
-    ///     - word_index: The 0 indexed word that the value shall be stored at
-    ///     - value: The value to be stored
+    /// # Parameters:
+    ///     * word_index (u16): The 0 indexed word that the value shall be stored at
+    ///     * pointer (OOP): The pointer to the object
+    ///     * value (u16): The value to be stored
+    //
+    //  see Bluebook p. 686
+    //
+    //  storeWord: wordIndex ofObject: objectPointer withValue: valueWord
+    //    ↑self heapChunkOf: objectPointer word: HeaderSize + wordIndex
+    //      put: valueWord
+    //
     pub fn store_word(&mut self, word_index: u16, pointer: OOP, value: u16) {
         self.heap_chunk_of_word_put(pointer, word_index, value);
     }
 
     /// Fetch a specific byte of an object, without accounting for the header offset.
     ///
-    /// Parameters:
-    ///     - pointer: The pointer to the object
-    ///     - byte_index: The 0 indexed byte that shall be fetched
+    /// # Parameters:
+    ///     * byte_index (u16): The 0 indexed byte that shall be fetched
+    ///     * pointer (OOP): The pointer to the object
     ///
-    /// Returns:
-    ///     - u16, the raw byte data
+    /// # Returns:
+    ///     * u8, the raw byte data
+    //
+    //  see Bluebook p. 687
+    //
+    //  fetchByte: byteIndex ofObject: objectPointer
+    //    ↑self heapChunkOf: objectPointer byte: (HeaderSize*2 + byteIndex)
+    //
     pub fn fetch_byte(&self, byte_index: u16, pointer: OOP) -> u8 {
         return self.heap_chunk_of_byte(pointer, byte_index);
     }
 
     /// Store a specific byte of an object, without accounting for the header offset.
     ///
-    /// Parameters:
-    ///     - pointer: The pointer to the object
-    ///     - byte_index: The 0 indexed byte that the value shall be stored at
-    ///     - value: The value to be stored
+    /// # Parameters:
+    ///     * byte_index (u16): The 0 indexed byte that the value shall be stored at
+    ///     * pointer (OOP): The pointer to the object
+    ///     * value (u8): The value to be stored
+    //
+    //  see Bluebook p. 687
+    //
+    //  storeByte: byteIndex ofObject: objectPointer withValue: valueByte
+    //    ↑self heapChunkOf: objectPointer
+    //      byte: (HeaderSize*2 + byteIndex)
+    //      put: valueByte
+    //
     pub fn store_byte(&mut self, byte_index: u16, pointer: OOP, value: u8) {
         self.heap_chunk_of_byte_put(pointer, byte_index, value);
     }
@@ -800,24 +1163,36 @@ impl ObjectMemory {
 
     /// Fetch the length of an object in words.
     ///
-    /// Parameters:
-    ///     - pointer: The pointer to the object
+    /// # Parameters:
+    ///     * oop (OOP): The pointer to the object
     ///
-    /// Returns:
-    ///     - u16, the length of the object, in words, excluding the header.
-    ///       (The amount of fields of the object)
+    /// # Returns:
+    ///     * u16, the length of the object in words, excluding the header
+    ///       (the number of fields of the object)
+    //
+    //  see Bluebook p. 687
+    //
+    //  fetchWordLengthOf: objectPointer
+    //    ↑(self sizeBitsOf: objectPointer) - HeaderSize
+    //
     pub fn fetch_word_length_of(&self, oop: OOP) -> u16 {
         return self.size_bits_of(oop) - HEADER_SIZE;
     }
 
     /// Fetch the length of an object in bytes.
     ///
-    /// Parameters:
-    ///     - pointer: The pointer to the object
+    /// # Parameters:
+    ///     * oop (OOP): The pointer to the object
     ///
-    /// Returns:
-    ///     - u16, the length of the object, in bytes, excluding the header
-    ///       and accounting for the odd bit.
+    /// # Returns:
+    ///     * u16, the length of the object in bytes, excluding the header
+    ///       and accounting for the odd bit
+    //
+    //  see Bluebook p. 687
+    //
+    //  fetchByteLengthOf: objectPointer
+    //    ↑(self fetchWordLengthOf: objectPointer)*2 - (self oddBitOf: objectPointer)
+    //
     pub fn fetch_byte_length_of(&self, oop: OOP) -> u16 {
         if self.odd_bit_of(oop) {
             return (self.fetch_word_length_of(oop) * 2) - 1;
@@ -832,13 +1207,20 @@ impl ObjectMemory {
 
     /// Fetch the class information of an object.
     ///
-    /// Parameters:
-    ///     - pointer: The pointer to the object
+    /// # Parameters:
+    ///     * pointer (OOP): The pointer to the object
     ///
-    /// Returns:
-    ///     - CLASS_SMALL_INTEGER_POINTER: pointer to the SmallInteger class if object is an
-    ///     integer
-    ///     - value of the class pointer field of the object otherwise.
+    /// # Returns:
+    ///     * u16, CLASS_SMALL_INTEGER_POINTER if object is an integer,
+    ///       or the class pointer field of the object otherwise
+    //
+    //  see Bluebook p. 687
+    //
+    //  fetchClassOf: objectPointer
+    //    (self isIntegerObject: objectPointer)
+    //      ifTrue: [↑IntegerClass]
+    //      ifFalse: [↑self classBitsOf: objectPointer]
+    //
     pub fn fetch_class_of(&self, pointer: OOP) -> u16 {
         if pointer.is_integer_object() {
             return CLASS_SMALL_INTEGER_POINTER;
@@ -856,8 +1238,14 @@ impl ObjectMemory {
     ///
     /// If the object is an integer object, the count will not be increased.
     ///
-    /// Parameters:
-    ///     - oop: The pointer to the object
+    /// # Parameters:
+    ///     * oop (OOP): The pointer to the object
+    //
+    //  see Bluebook p. 687
+    //
+    //  increaseReferencesTo: objectPointer
+    //    self countUp: objectPointer
+    //
     pub fn increase_references_to(&mut self, oop: OOP) {
         if oop.is_integer_object() {
             return;
@@ -879,8 +1267,14 @@ impl ObjectMemory {
     /// If the count of an object reaches 128, it is regarded as saturated and
     /// will not get the count decreased.
     ///
-    /// Parameters:
-    ///     - oop: The pointer to the object
+    /// # Parameters:
+    ///     * oop (OOP): The pointer to the object
+    //
+    //  see Bluebook p. 687
+    //
+    //  decreaseReferencesTo: objectPointer
+    //    self countDown: objectPointer
+    //
     pub fn decrease_references_to(&mut self, oop: OOP) {
         if oop.is_integer_object() {
             return;
@@ -917,6 +1311,32 @@ impl ObjectMemory {
         }
     }
 
+    /// Tries to allocate a chunk, retrying with compaction and segment cycling on failure.
+    ///
+    /// # Parameters:
+    ///     * size (u16): The size of the chunk to allocate in words
+    ///
+    /// # Returns:
+    ///     * Result<u16, ObjectMemoryError>, the chunk location,
+    ///       or NoFreeEntries if allocation failed across all segments
+    //
+    //  see Bluebook p. 669
+    //
+    //  attemptToAllocateChunk: size
+    //    | objectPointer |
+    //    objectPointer ← self attemptToAllocateChunkInCurrentSegment: size.
+    //    objectPointer isNil ifFalse: [↑objectPointer].
+    //    1 to: HeapSegmentCount do:
+    //      [ :i |
+    //        currentSegment ← currentSegment + 1.
+    //        currentSegment > LastHeapSegment
+    //          ifTrue: [currentSegment ← FirstHeapSegment].
+    //        self compactCurrentSegment.
+    //        objectPointer
+    //          ← self attemptToAllocateChunkInCurrentSegment: size.
+    //        objectPointer isNil ifFalse: [↑objectPointer]].
+    //    ↑nil
+    //
     fn allocate_with_retries(&mut self, size: u16) -> Result<u16, ObjectMemoryError> {
         let mut result = self.attempt_to_allocate_chunk_in_current_segment(size);
 
@@ -946,6 +1366,24 @@ impl ObjectMemory {
         return result;
     }
 
+    /// Creates a new object whose fields are all pointers, initialized to NilPointer.
+    ///
+    /// # Parameters:
+    ///     * class (u16): The class pointer for the new object
+    ///     * length (u16): The number of pointer fields
+    ///
+    /// # Returns:
+    ///     * Result<OOP, ObjectMemoryError>, the new object pointer,
+    ///       or an error if allocation failed
+    //
+    //  see Bluebook p. 687
+    //
+    //  instantiateClass: classPointer withPointers: length
+    //    | size extra |
+    //    size ← HeaderSize + length.
+    //    extra ← size < HugeSize ifTrue: [0] ifFalse: [1].
+    //    ↑self allocate: size odd: 0 pointer: 1 extra: extra class: classPointer
+    //
     pub fn instantiate_class_with_pointers(
         &mut self,
         class: u16,
@@ -963,6 +1401,23 @@ impl ObjectMemory {
         return Ok(oop);
     }
 
+    /// Creates a new nonpointer object whose fields are 16-bit words, initialized to 0.
+    ///
+    /// # Parameters:
+    ///     * class (u16): The class pointer for the new object
+    ///     * length (u16): The number of word fields
+    ///
+    /// # Returns:
+    ///     * Result<OOP, ObjectMemoryError>, the new object pointer,
+    ///       or an error if allocation failed
+    //
+    //  see Bluebook p. 687
+    //
+    //  instantiateClass: classPointer withWords: length
+    //    | size |
+    //    size ← HeaderSize + length.
+    //    ↑self allocate: size odd: 0 pointer: 0 extra: 0 class: classPointer
+    //
     pub fn instantiate_class_with_words(
         &mut self,
         class: u16,
@@ -980,6 +1435,23 @@ impl ObjectMemory {
         return Ok(oop);
     }
 
+    /// Creates a new nonpointer object whose fields are 8-bit bytes, initialized to 0.
+    ///
+    /// # Parameters:
+    ///     * class (u16): The class pointer for the new object
+    ///     * length (u16): The number of byte fields
+    ///
+    /// # Returns:
+    ///     * Result<OOP, ObjectMemoryError>, the new object pointer,
+    ///       or an error if allocation failed
+    //
+    //  see Bluebook p. 687
+    //
+    //  instantiateClass: classPointer withBytes: length
+    //    | size |
+    //    size ← HeaderSize + ((length + 1) / 2).
+    //    ↑self allocate: size odd: length\\2 pointer: 0 extra: 0 class: classPointer
+    //
     pub fn instantiate_class_with_bytes(
         &mut self,
         class: u16,
@@ -1304,6 +1776,53 @@ mod ref_counting_tests {
 // ====================================
 
 impl ObjectMemory {
+    /// Searches the current segment's free chunk lists for a fitting chunk.
+    ///
+    /// # Parameters:
+    ///     * size (u16): The required chunk size in words
+    ///
+    /// # Returns:
+    ///     * Result<u16, ObjectMemoryError>, the chunk location,
+    ///       or NoFreeEntries if no fitting chunk exists
+    //
+    //  see Bluebook p. 669-670
+    //
+    //  attemptToAllocateChunkInCurrentSegment: size
+    //    | objectPointer predecessor next availableSize excessSize newPointer |
+    //    size < BigSize
+    //      ifTrue: [objectPointer ← self removeFromFreeChunkList: size].
+    //    objectPointer notNil
+    //      ifTrue: [↑objectPointer].
+    //    predecessor ← NonPointer.
+    //    objectPointer ← self headOfFreeChunkList: LastFreeChunkList
+    //      inSegment: currentSegment.
+    //    [objectPointer = NonPointer] whileFalse:
+    //      [availableSize ← self sizeBitsOf: objectPointer.
+    //      availableSize = size
+    //        ifTrue:
+    //          [next ← self classBitsOf: objectPointer.
+    //          predecessor = NonPointer
+    //            ifTrue:
+    //              [self headOfFreeChunkList: LastFreeChunkList
+    //                inSegment: currentSegment put: next]
+    //            ifFalse:
+    //              [self classBitsOf: predecessor
+    //                put: next].
+    //          ↑objectPointer].
+    //        excessSize ← availableSize - size.
+    //        excessSize >= HeaderSize
+    //          ifTrue:
+    //            [newPointer ← self obtainPointer: size
+    //              location: (self locationBitsOf: objectPointer)
+    //                + excessSize.
+    //            newPointer isNil ifTrue: [↑nil].
+    //            self sizeBitsOf: objectPointer put: excessSize.
+    //            ↑newPointer]
+    //          ifFalse:
+    //            [predecessor ← objectPointer.
+    //            objectPointer ← self classBitsOf: objectPointer]].
+    //    ↑nil
+    //
     fn attempt_to_allocate_chunk_in_current_segment(
         &mut self,
         size: u16,
@@ -1365,15 +1884,28 @@ impl ObjectMemory {
         return Err(ObjectMemoryError::NoFreeEntries);
     }
 
-    /// Fetch a free pointer and return a new 'fresh' object
+    /// Fetch a free pointer and return a new 'fresh' object.
     ///
-    /// Parameters:
-    ///     - size: the size of the new object (number of fields)
-    ///     - location: the 'requested' location for the new object
+    /// # Parameters:
+    ///     * size (u16): The size of the new object in words (including header)
+    ///     * location (u16): The heap location for the new object
     ///
-    /// Returns:
-    ///     - Pointer to the new object
-    ///     - ObjectMemoryError if no free memory is available
+    /// # Returns:
+    ///     * Result<OOP, ObjectMemoryError>, the new object pointer,
+    ///       or an error if no free OT entries are available
+    //
+    //  see Bluebook p. 670
+    //
+    //  obtainPointer: size location: location
+    //    | objectPointer |
+    //    objectPointer ← self removeFromFreePointerList.
+    //    objectPointer isNil ifTrue: [↑nil].
+    //    self ot: objectPointer put: 0.
+    //    self segmentBitsOf: objectPointer put: currentSegment.
+    //    self locationBitsOf: objectPointer put: location.
+    //    self sizeBitsOf: objectPointer put: size.
+    //    ↑objectPointer
+    //
     fn obtain_pointer(&mut self, size: u16, location: u16) -> Result<OOP, ObjectMemoryError> {
         let oop = self.remove_from_free_pointer_list()?;
         self.segment_bits_of_put(oop, self.current_segment);
@@ -1382,10 +1914,19 @@ impl ObjectMemory {
         return Ok(oop);
     }
 
-    /// 'Removes' the object from memory
+    /// 'Removes' the object from memory.
     ///
-    /// Parameters:
-    ///     - oop: The pointer to the object that shall be erased
+    /// # Parameters:
+    ///     * oop (OOP): The pointer to the object that shall be erased
+    //
+    //  see Bluebook p. 670
+    //
+    //  deallocate: objectPointer
+    //    | space |
+    //    space ← self spaceOccupiedBy: objectPointer.
+    //    self sizeBitsOf: objectPointer put: space.
+    //    self toFreeChunkList: (space min: BigSize) add: objectPointer
+    //
     fn deallocate(&mut self, oop: OOP) {
         let size = self.size_bits_of(oop);
         let loc = self.location_bits_of(oop);
@@ -1394,13 +1935,51 @@ impl ObjectMemory {
         self.to_free_chunk_list_add(seg, size, loc);
     }
 
-    /// Clears all free lists by setting the top to NON_POINTER
+    /// Clears all free chunk lists for a segment by resetting each head to NON_POINTER.
+    ///
+    /// # Parameters:
+    ///     * segment (u8): The heap segment to clear
+    //
+    //  see Bluebook p. 671
+    //
+    //  abandonFreeChunksInSegment: segment
+    //    | lowWaterMark objectPointer nextPointer |
+    //    lowWaterMark ← HeapSpaceStop.
+    //    HeaderSize to: BigSize do:
+    //      [ :size |
+    //        objectPointer ← self headOfFreeChunkList: size
+    //          inSegment: segment.
+    //        [objectPointer = NonPointer] whileFalse:
+    //          [lowWaterMark ← lowWaterMark
+    //            min: (self locationBitsOf: objectPointer).
+    //          nextPointer ← self classBitsOf: objectPointer.
+    //          self classBitsOf: objectPointer put: NonPointer.
+    //          self releasePointer: objectPointer.
+    //          objectPointer ← nextPointer].
+    //        self resetFreeChunkList: size inSegment: segment].
+    //    ↑lowWaterMark
+    //
     fn abandon_free_chunks_in_segment(&mut self, segment: u8) {
         for i in 0..=BIG_SIZE {
             self.heap[segment as usize][(FIRST_FREE_CHUNK_LIST + i) as usize] = NON_POINTER
         }
     }
 
+    /// Compacts the current heap segment by sliding all live objects toward the bottom.
+    ///
+    //  see Bluebook p. 674
+    //
+    //  compactCurrentSegment
+    //    | lowWaterMark bigSpace |
+    //    lowWaterMark ← self abandonFreeChunksInSegment: currentSegment.
+    //    lowWaterMark < HeapSpaceStop
+    //      ifTrue:
+    //        [self reverseHeapPointersAbove: lowWaterMark.
+    //        bigSpace ← self sweepCurrentSegmentFrom: lowWaterMark.
+    //        self deallocate: (self obtainPointer:
+    //          (HeapSpaceStop + 1 - bigSpace)
+    //          location: bigSpace)]
+    //
     fn compact_current_segment(&mut self) {
         // 'forget' all free chunks since we'll realign anyways
         self.abandon_free_chunks_in_segment(self.current_segment);
@@ -1410,7 +1989,7 @@ impl ObjectMemory {
             oop: OOP,
             location: u16,
             size: u16,
-        };
+        }
 
         let mut entries: Vec<Entry> = Vec::new();
 
@@ -1464,7 +2043,7 @@ impl ObjectMemory {
 
 #[cfg(test)]
 mod allocator_tests {
-    use crate::globalconstants::{BIG_SIZE, FIRST_FREE_CHUNK_LIST, HEADER_SIZE, NON_POINTER};
+    use crate::globalconstants::{BIG_SIZE, FIRST_FREE_CHUNK_LIST, NON_POINTER};
 
     use super::*;
 
