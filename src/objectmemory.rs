@@ -76,6 +76,48 @@ pub struct ObjectMemory {
     current_segment: u8,
 }
 
+impl ObjectMemory {
+    pub fn from_image(heap: Vec<Vec<u16>>, object_table: Vec<u16>) -> Self {
+        let mut memory = ObjectMemory {
+            heap: Self::construct_heap(heap),
+            object_table,
+            free_pointer_list: NON_POINTER,
+            current_segment: 0,
+        };
+        memory.rebuild_free_pointer_list();
+        memory
+    }
+
+    fn construct_heap(heapdata: Vec<Vec<u16>>) -> Heap {
+        let mut heap = Heap::new();
+
+        for (segment_index, segment_data) in heapdata.into_iter().enumerate() {
+            heap.data[segment_index].data[..segment_data.len()].copy_from_slice(&segment_data);
+        }
+
+        heap
+    }
+
+    fn rebuild_free_pointer_list(&mut self) {
+        let len = self.object_table.len();
+        let mut oop = 0usize;
+        while oop < len {
+            if self.free_bit_of(OOP::from_raw(oop as u16)) {
+                self.to_free_pointer_list_add(OOP::from_raw(oop as u16));
+            }
+            oop += 2;
+        }
+    }
+
+    pub fn is_free_oop(&self, oop: OOP) -> bool {
+        return self.free_bit_of(oop);
+    }
+
+    pub fn object_table_len(&self) -> usize {
+        return self.object_table.len();
+    }
+}
+
 // ====================================
 // Functions for ObjectTableEntries
 // ====================================
