@@ -2,6 +2,7 @@ use minifb::{Key, Window, WindowOptions};
 
 mod errors;
 mod globalconstants;
+mod image;
 mod objectmemory;
 mod oop;
 
