@@ -76,8 +76,25 @@ pub const MUST_BE_BOOLEAN_SELECTOR: u16 = 0x34;
 // Allocation variables
 pub const NON_POINTER: u16 = 0xFFFF;
 
+// How many fields a object should have till its considered 'big'
 pub const BIG_SIZE: u16 = 20;
+
+// The offset to the first free chunk list
 pub const FIRST_FREE_CHUNK_LIST: u16 = 0;
 
 // FIRST_FREE_CHUNK_LIST + BIG_SIZE
 pub const LAST_BIG_CHUNK_LIST: u16 = 20;
+
+// IMAGE HANDLING
+
+// How many words are in each image page
+pub const IMAGE_PAGE_SIZE_WORDS: usize = 256;
+
+// How many bytes are in each image page
+pub const IMAGE_PAGE_SIZE_BYTES: usize = 512;
+
+// How many words are in the image header
+pub const IMAGE_HEADER_WORDS: usize = 256;
+
+// How many bytes are in the image header
+pub const IMAGE_HEADER_BYTES: usize = 512;
