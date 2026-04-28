@@ -23,3 +23,18 @@ impl fmt::Display for ObjectMemoryError {
         }
     }
 }
+
+#[derive(Debug)]
+pub enum ImageLoadError {
+    Io(std::io::Error),
+    TooShort(String),
+    UnsupportedImageType(String),
+    InvalidHeader(String),
+    InvalidImage(String),
+}
+
+impl From<std::io::Error> for ImageLoadError {
+    fn from(err: std::io::Error) -> Self {
+        ImageLoadError::Io(err)
+    }
+}
