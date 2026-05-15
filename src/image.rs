@@ -44,15 +44,18 @@ impl Image {
         let last_segment: u16;
         let limit_in_last_page: u16;
         let image_type: u16;
+        let heap_length: u32;
 
         if big_endian {
-            last_segment = u16::from_be_bytes([data[0], data[1]]); // word 0
-            limit_in_last_page = u16::from_be_bytes([data[2], data[3]]); // word 1
+            heap_length = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+            last_segment = (heap_length >> 16) as u16; // word 0
+            limit_in_last_page = (heap_length & 0xFFFF) as u16; // word 1
             image_type = u16::from_be_bytes([data[8], data[9]]); // word 4
         } else {
+            heap_length = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
             object_table_length = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-            last_segment = u16::from_le_bytes([data[0], data[1]]); // word 0
-            limit_in_last_page = u16::from_le_bytes([data[2], data[3]]); // word 1
+            last_segment = (heap_length >> 16) as u16; // word 0
+            limit_in_last_page = (heap_length & 0xFFFF) as u16; // word 1
             image_type = u16::from_le_bytes([data[8], data[9]]); // word 4
         }
 
