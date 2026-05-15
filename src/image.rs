@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, u32};
 
 use crate::{
     errors::ImageLoadError,
@@ -20,11 +20,11 @@ pub struct Image {
 }
 
 #[derive(Debug, Clone)]
-struct ImageHeader {
-    last_segment: u16,
-    limit_in_last_page: u16,
-    object_table_length: u32,
-    image_type: u16,
+pub struct ImageHeader {
+    pub last_segment: u16,
+    pub limit_in_last_page: u16,
+    pub object_table_length: u32,
+    pub image_type: u16,
 }
 
 impl Image {
@@ -161,6 +161,18 @@ impl Image {
         }
         return Ok(mem);
     }
+
+    pub fn header(&self) -> &ImageHeader {
+        &self.header
+    }
+
+    pub fn big_endian(&self) -> bool {
+        self.big_endian
+    }
+
+    pub fn data_len(&self) -> usize {
+        self.data.len()
+    }
 }
 
 #[cfg(test)]
@@ -249,5 +261,26 @@ mod tests {
         let mem_be = Image::parse_into_memory(&img_be).expect("parse BE failed");
         let mem_le = Image::parse_into_memory(&img_le).expect("parse LE failed");
         assert_eq!(mem_be, mem_le);
+    }
+
+    #[test]
+    fn loads_xerox_v2_snapshot() {
+        use crate::globalconstants::CLASS_METHOD_CONTEXT_POINTER;
+
+        let img = Image::load(fixture("snapshot.im")).expect("load failed");
+        let mem = Image::parse_into_memory(&img).expect("parse failed");
+
+        // Walk the bootstrap chain documented in Bluebook ch.30:
+        //   SchedulerAssociation -> ProcessorScheduler -> active Process -> suspended MethodContext
+        // All three hops use field index 1 (value / activeProcess / suspendedContext).
+        let scheduler = mem.fetch_pointer(1, OOP::from_raw(SCHEDULER_ASSOCIATION_POINTER));
+        let active_process = mem.fetch_pointer(1, OOP::from_raw(scheduler));
+        let initial_context = mem.fetch_pointer(1, OOP::from_raw(active_process));
+
+        assert_eq!(
+            mem.fetch_class_of(OOP::from_raw(initial_context)),
+            CLASS_METHOD_CONTEXT_POINTER,
+            "the active process's suspended context must be a MethodContext"
+        );
     }
 }
