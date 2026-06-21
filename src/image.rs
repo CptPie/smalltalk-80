@@ -1,4 +1,7 @@
-use std::{path::PathBuf, u32};
+use std::{
+    fs::write,
+    path::{Path, PathBuf},
+};
 
 use crate::{
     errors::ImageLoadError,
@@ -28,6 +31,19 @@ pub struct ImageHeader {
 }
 
 impl Image {
+    /// Reads an .im image file from disk and parses its 512-byte header.
+    ///
+    /// Endianness is detected by interpreting the object table length field
+    /// as big-endian: since a valid OT length fits in u16, a BE u32 that
+    /// exceeds 0xFFFF indicates LE encoding instead.
+    ///
+    /// # Parameters:
+    ///     * path (PathBuf): The filesystem path to the .im file
+    ///
+    /// # Returns:
+    ///     * Result<Image, ImageLoadError>, the loaded image with its decoded
+    ///       header, or an error if the file is too short, the image type is
+    ///       unsupported, or I/O failed
     pub fn load(path: PathBuf) -> Result<Image, ImageLoadError> {
         let data = std::fs::read(&path)?;
 
@@ -91,6 +107,23 @@ impl Image {
         Ok(image)
     }
 
+    /// Parses the loaded image's heap and object table into an ObjectMemory.
+    ///
+    /// The heap follows the 512-byte header; the object table starts at the
+    /// next 512-byte page boundary after the heap. Endianness follows the
+    /// value detected at load time. Validates that the well-known OOPs
+    /// (nil, true, false, scheduler association, primitive class pointers)
+    /// are present and not marked free.
+    ///
+    /// The returned ObjectMemory is ready for read-only inspection. Before
+    /// any allocation, call `ObjectMemory::rebuild_free_pointer_list`.
+    ///
+    /// # Parameters:
+    ///     * image (&Image): The image whose bytes should be parsed
+    ///
+    /// # Returns:
+    ///     * Result<ObjectMemory, ImageLoadError>, the parsed memory, or an
+    ///       InvalidImage error if a well-known OOP is missing or marked free
     pub fn parse_into_memory(image: &Image) -> Result<ObjectMemory, ImageLoadError> {
         let mut heap_segments: Vec<Vec<u16>> = Vec::new();
         let mut heap_segment: Vec<u16> = Vec::with_capacity(HEAP_SEGMENT_SIZE);
@@ -162,16 +195,137 @@ impl Image {
         return Ok(mem);
     }
 
+    /// Returns a reference to the decoded image header.
+    ///
+    /// # Returns:
+    ///     * &ImageHeader, the four decoded header fields (heap dimensions,
+    ///       OT length, image type)
     pub fn header(&self) -> &ImageHeader {
         &self.header
     }
 
+    /// Returns whether the image is big-endian encoded.
+    ///
+    /// # Returns:
+    ///     * bool, true if the image uses big-endian word ordering
     pub fn big_endian(&self) -> bool {
         self.big_endian
     }
 
+    /// Returns the total size of the loaded image file in bytes.
+    ///
+    /// # Returns:
+    ///     * usize, the number of bytes that were read from disk
     pub fn data_len(&self) -> usize {
         self.data.len()
+    }
+
+    /// Returns a reference to the raw bytes of the loaded image file.
+    ///
+    /// # Returns:
+    ///     * &[u8], the unmodified bytes as read from disk
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// Serialises an ObjectMemory back into the .im file byte format.
+    ///
+    /// Heap dimensions are taken from `mem`; image type and endianness are
+    /// taken from this Image's original header. Layout mirrors the load
+    /// side: 512-byte header, heap (zero-padded to the next page boundary),
+    /// then object table. For an unmutated load → dump roundtrip the
+    /// resulting bytes match the original file exactly.
+    ///
+    /// # Parameters:
+    ///     * mem (&ObjectMemory): The object memory to serialise
+    ///
+    /// # Returns:
+    ///     * Vec<u8>, the serialised image bytes
+    pub fn dump(&self, mem: &ObjectMemory) -> Vec<u8> {
+        // how many segments? (zero indexed)
+        let last_seg = mem.last_segment();
+        // how many words are actually in the last segment?
+        let limit = mem.limit_in_last_page();
+        // total words contained in the heap
+        let heap_words = last_seg as usize * HEAP_SEGMENT_SIZE + limit as usize;
+        // words in the object table
+        let ot_words = mem.object_table_len();
+        // where in the image does the heap end?
+        let heap_end = IMAGE_HEADER_BYTES + heap_words as usize * 2;
+        // Where does the object table start? This value holds the index of the last byte of the
+        // 'last' page that the heap occupies
+        let ot_offset = heap_end.div_ceil(IMAGE_PAGE_SIZE_BYTES) * IMAGE_PAGE_SIZE_BYTES;
+        // total image size (calculated)
+        let total = ot_offset + ot_words * 2;
+
+        let mut out = Vec::with_capacity(total);
+
+        // helper functions for insertion, here as closures
+        fn push_u16(out: &mut Vec<u8>, v: u16, big_endian: bool) {
+            if big_endian {
+                out.extend_from_slice(&v.to_be_bytes())
+            } else {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+
+        fn push_u32(out: &mut Vec<u8>, v: u32, big_endian: bool) {
+            if big_endian {
+                out.extend_from_slice(&v.to_be_bytes())
+            } else {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+
+        // part one: The Header
+
+        // heap_length is a 2 word value (32 bit) containing the last segment in the high word, and
+        // the limit in the low word
+        let heap_length = ((last_seg as u32) << 16) | (limit as u32);
+        push_u32(&mut out, heap_length, self.big_endian);
+        push_u32(&mut out, ot_words as u32, self.big_endian);
+        push_u16(&mut out, self.header.image_type, self.big_endian);
+        // pad with 0x00 to end of the first page
+        out.resize(IMAGE_HEADER_BYTES, 0);
+
+        // part two: The heap
+
+        for seg in 0..=last_seg {
+            let seg_len = if seg == last_seg {
+                limit as usize
+            } else {
+                HEAP_SEGMENT_SIZE
+            };
+            for word in 0..seg_len {
+                push_u16(
+                    &mut out,
+                    mem.heap_segments()[seg as usize][word],
+                    self.big_endian,
+                );
+            }
+        }
+
+        // pad with 0x00 to the next page boundry
+        out.resize(ot_offset, 0);
+
+        // part three: The object table
+        for &word in mem.object_table() {
+            push_u16(&mut out, word, self.big_endian);
+        }
+
+        return out;
+    }
+
+    /// Dumps an ObjectMemory and writes the resulting bytes to disk.
+    ///
+    /// # Parameters:
+    ///     * mem (&ObjectMemory): The object memory to serialise
+    ///     * path (&Path): The filesystem destination
+    ///
+    /// # Returns:
+    ///     * std::io::Result<()>, Ok if the write succeeded
+    pub fn save(&self, mem: &ObjectMemory, path: &Path) -> std::io::Result<()> {
+        write(path, self.dump(mem))
     }
 }
 
@@ -282,5 +436,68 @@ mod tests {
             CLASS_METHOD_CONTEXT_POINTER,
             "the active process's suspended context must be a MethodContext"
         );
+    }
+}
+
+#[cfg(test)]
+mod dump_tests {
+    use super::*;
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("testBinaries")
+            .join(name)
+    }
+
+    fn assert_dump_roundtrip(fixture_name: &str) {
+        let img = Image::load(fixture(fixture_name)).expect("load failed");
+        let mem = Image::parse_into_memory(&img).expect("parse failed");
+        let dumped = img.dump(&mem);
+        let original = std::fs::read(fixture(fixture_name)).expect("image read error");
+        assert_eq!(
+            dumped.len(),
+            original.len(),
+            "length mismatch for {}",
+            fixture_name
+        );
+        for (i, (&d, &o)) in dumped.iter().zip(original.iter()).enumerate() {
+            if d != o {
+                panic!(
+                    "{4}: first mismatch at byte {0} ({0:#x}): dumped={1:#04x}, original={2:#04x}\n  region: {3}",
+                    i,
+                    d,
+                    o,
+                    if i < IMAGE_HEADER_BYTES {
+                        "header"
+                    } else if i < IMAGE_HEADER_BYTES
+                        + (mem.last_segment() as usize * HEAP_SEGMENT_SIZE
+                            + mem.limit_in_last_page() as usize)
+                            * 2
+                    {
+                        "heap"
+                    } else if i < (i.div_ceil(IMAGE_PAGE_SIZE_BYTES) * IMAGE_PAGE_SIZE_BYTES) {
+                        "gap"
+                    } else {
+                        "OT"
+                    },
+                    fixture_name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dump_roundtrips_xerox_v2_snapshot() {
+        assert_dump_roundtrip("snapshot.im");
+    }
+
+    #[test]
+    fn dump_roundtrips_be_fixture() {
+        assert_dump_roundtrip("parse_be.im");
+    }
+
+    #[test]
+    fn dump_roundtrips_le_fixture() {
+        assert_dump_roundtrip("parse_le.im");
     }
 }

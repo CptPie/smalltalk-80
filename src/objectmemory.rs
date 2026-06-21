@@ -14,7 +14,7 @@ use crate::{
 
 // Custom Type definitions
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct HeapSegment {
+pub struct HeapSegment {
     data: Vec<u16>,
 }
 impl HeapSegment {
@@ -41,7 +41,7 @@ impl IndexMut<usize> for HeapSegment {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Heap {
+pub struct Heap {
     data: Vec<HeapSegment>,
 }
 
@@ -74,18 +74,36 @@ pub struct ObjectMemory {
     object_table: Vec<u16>,
     free_pointer_list: u16,
     current_segment: u8,
+    last_segment: u8,
+    limit_in_last_page: u16,
 }
 
 impl ObjectMemory {
+    /// Constructs an ObjectMemory from parsed heap segments and an object table.
+    ///
+    /// Derives the heap dimensions (`last_segment`, `limit_in_last_page`)
+    /// from the shape of `heap`. The result is suitable for read-only
+    /// inspection; before the first allocation, call
+    /// `rebuild_free_pointer_list` to thread the free entries.
+    ///
+    /// # Parameters:
+    ///     * heap (Vec<Vec<u16>>): The heap segments. Each inner Vec holds
+    ///       the words of one segment; the last segment may be partial.
+    ///     * object_table (Vec<u16>): The flat object table (two words per OOP)
+    ///
+    /// # Returns:
+    ///     * ObjectMemory, the memory holding the supplied data
     pub fn from_image(heap: Vec<Vec<u16>>, object_table: Vec<u16>) -> Self {
-        let mut memory = ObjectMemory {
+        let last_segment = (heap.len() - 1) as u8;
+        let limit_in_last_page = heap.last().map(|s| s.len()).unwrap_or(0) as u16;
+        ObjectMemory {
             heap: Self::construct_heap(heap),
             object_table,
             free_pointer_list: NON_POINTER,
             current_segment: 0,
-        };
-        memory.rebuild_free_pointer_list();
-        memory
+            last_segment: last_segment,
+            limit_in_last_page: limit_in_last_page,
+        }
     }
 
     fn construct_heap(heapdata: Vec<Vec<u16>>) -> Heap {
@@ -98,7 +116,15 @@ impl ObjectMemory {
         heap
     }
 
-    fn rebuild_free_pointer_list(&mut self) {
+    /// Walks the object table and threads every free OOP onto a fresh free
+    /// pointer chain.
+    ///
+    /// Mutates the location words of every free OT entry, so any chain
+    /// state previously stored on disk is overwritten. Must be called
+    /// before the first allocation; not required for read-only inspection
+    /// (`fetch_pointer`, `fetch_class_of`, `is_free_oop` etc. do not depend
+    /// on the chain).
+    pub fn rebuild_free_pointer_list(&mut self) {
         let len = self.object_table.len();
         let mut oop = 0usize;
         while oop < len {
@@ -109,12 +135,62 @@ impl ObjectMemory {
         }
     }
 
+    /// Returns whether the given OOP refers to a free object table entry.
+    ///
+    /// # Parameters:
+    ///     * oop (OOP): The pointer to query
+    ///
+    /// # Returns:
+    ///     * bool, true if the OT entry's free bit is set
     pub fn is_free_oop(&self, oop: OOP) -> bool {
-        return self.free_bit_of(oop);
+        self.free_bit_of(oop)
     }
 
+    /// Returns the number of 16-bit words in the object table.
+    ///
+    /// Each OT entry occupies two words, so the entry count is
+    /// `object_table_len() / 2`.
+    ///
+    /// # Returns:
+    ///     * usize, the OT length in words
     pub fn object_table_len(&self) -> usize {
-        return self.object_table.len();
+        self.object_table.len()
+    }
+
+    /// Returns the index of the highest-numbered heap segment that
+    /// contains data.
+    ///
+    /// # Returns:
+    ///     * u8, the last populated segment index (0..=15)
+    pub fn last_segment(&self) -> u8 {
+        self.last_segment
+    }
+
+    /// Returns the number of populated words in the (partially filled) last
+    /// heap segment.
+    ///
+    /// # Returns:
+    ///     * u16, the count of meaningful words in segment `last_segment`
+    pub fn limit_in_last_page(&self) -> u16 {
+        self.limit_in_last_page
+    }
+
+    /// Returns a reference to the heap.
+    ///
+    /// Use `[seg][offset]` indexing to read individual words.
+    ///
+    /// # Returns:
+    ///     * &Heap, the heap data
+    pub fn heap_segments(&self) -> &Heap {
+        &self.heap
+    }
+
+    /// Returns a slice view of the raw object table.
+    ///
+    /// # Returns:
+    ///     * &[u16], the OT as a flat sequence of 16-bit words
+    pub fn object_table(&self) -> &[u16] {
+        &self.object_table
     }
 }
 
@@ -418,6 +494,8 @@ mod ot_accessor_tests {
             object_table: vec![0u16; 64],
             free_pointer_list: NON_POINTER,
             current_segment: 0,
+            last_segment: 0,
+            limit_in_last_page: 0,
         };
     }
 
@@ -570,6 +648,8 @@ mod ot_free_list_tests {
             object_table: vec![0u16; 64],
             free_pointer_list: NON_POINTER,
             current_segment: 0,
+            last_segment: 0,
+            limit_in_last_page: 0,
         };
     }
 
@@ -891,6 +971,8 @@ mod heap_accessor_tests {
             object_table: vec![0u16; 64],
             free_pointer_list: NON_POINTER,
             current_segment: 0,
+            last_segment: 0,
+            limit_in_last_page: 0,
         };
         // OOP 0: segment 0, location 10
         mem.object_table[0] = 0x0000;
@@ -987,6 +1069,8 @@ mod heap_free_chunk_tests {
             object_table: vec![0u16; 64],
             free_pointer_list: NON_POINTER,
             current_segment: 0,
+            last_segment: 0,
+            limit_in_last_page: 0,
         };
         // initialize free chunk list heads to NON_POINTER (empty)
         for i in 0..=(BIG_SIZE as usize) {
@@ -1525,6 +1609,8 @@ mod api_accessor_tests {
             object_table: vec![0u16; 64],
             free_pointer_list: NON_POINTER,
             current_segment: 0,
+            last_segment: 0,
+            limit_in_last_page: 0,
         };
 
         // initialize free chunk list heads
@@ -1646,6 +1732,8 @@ mod ref_counting_tests {
             object_table: vec![0u16; 64],
             free_pointer_list: NON_POINTER,
             current_segment: 0,
+            last_segment: 0,
+            limit_in_last_page: 0,
         };
 
         // OOP 0: segment 0, location 22, count=5, pointer bit=1
@@ -2095,6 +2183,8 @@ mod allocator_tests {
             object_table: vec![0u16; 64],
             free_pointer_list: NON_POINTER,
             current_segment: 0,
+            last_segment: 0,
+            limit_in_last_page: 0,
         };
         // mark all OT entries as free so compaction doesn't pick up garbage
         for i in (0..64).step_by(2) {

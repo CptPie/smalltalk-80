@@ -1,4 +1,4 @@
-use std::{path::PathBuf, string};
+use std::path::PathBuf;
 
 mod errors;
 mod globalconstants;
@@ -8,8 +8,8 @@ mod oop;
 
 use crate::{
     globalconstants::{
-        CLASS_METHOD_CONTEXT_POINTER, FALSE_POINTER, NIL_POINTER, SCHEDULER_ASSOCIATION_POINTER,
-        TRUE_POINTER,
+        CLASS_METHOD_CONTEXT_POINTER, FALSE_POINTER, HEAP_SEGMENT_SIZE, IMAGE_HEADER_BYTES,
+        IMAGE_PAGE_SIZE_BYTES, NIL_POINTER, SCHEDULER_ASSOCIATION_POINTER, TRUE_POINTER,
     },
     image::Image,
     oop::OOP,
@@ -37,6 +37,53 @@ fn load_real_image(path: &str) {
         img.header().object_table_length
     );
     println!("image type:           {}", img.header().image_type);
+
+    println!("=== Padding Byte Check ===");
+    let heap_words = (img.header().last_segment as usize) * HEAP_SEGMENT_SIZE
+        + img.header().limit_in_last_page as usize;
+    let heap_end = IMAGE_HEADER_BYTES + heap_words * 2;
+    let ot_offset = heap_end.div_ceil(IMAGE_PAGE_SIZE_BYTES) * IMAGE_PAGE_SIZE_BYTES;
+    let ot_end = ot_offset + (img.header().object_table_length as usize) * 2;
+
+    let mut last_header_data = 0;
+    for (idx, &byte) in img.data().iter().enumerate() {
+        if byte != 0 {
+            last_header_data = idx;
+        }
+        if idx == IMAGE_HEADER_BYTES - 1 {
+            break;
+        }
+    }
+    let header_data_end = last_header_data + 1;
+
+    let header_pad_zero = img.data()[header_data_end..IMAGE_HEADER_BYTES]
+        .iter()
+        .all(|&b| b == 0);
+    let gap_zero = img.data()[heap_end..ot_offset].iter().all(|&b| b == 0);
+    let tail_zero = img.data()[ot_end..].iter().all(|&b| b == 0);
+
+    println!(
+        "header tail   (bytes   {}..{}):    {}",
+        header_data_end,
+        IMAGE_HEADER_BYTES,
+        if header_pad_zero {
+            "all zero"
+        } else {
+            "NON-ZERO"
+        }
+    );
+    println!(
+        "heap→OT gap   ({}..{}):    {}",
+        heap_end,
+        ot_offset,
+        if gap_zero { "all zero" } else { "NON-ZERO" }
+    );
+    println!(
+        "OT→EOF tail   ({}..{}):    {}",
+        ot_end,
+        img.data_len(),
+        if tail_zero { "all zero" } else { "NON-ZERO" }
+    );
 
     let mem = Image::parse_into_memory(&img).expect("parse failed");
 
