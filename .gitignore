@@ -1,2 +1,6 @@
 /target
 /resources
+
+# Coverage artifacts
+/lcov.info
+/tarpaulin-report.json
