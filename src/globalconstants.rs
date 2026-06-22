@@ -76,25 +76,47 @@ pub const MUST_BE_BOOLEAN_SELECTOR: u16 = 0x34;
 // Allocation variables
 pub const NON_POINTER: u16 = 0xFFFF;
 
-// How many fields a object should have till its considered 'big'
+/// How many fields a object should have till its considered 'big'
 pub const BIG_SIZE: u16 = 20;
 
-// The offset to the first free chunk list
+/// The offset to the first free chunk list
 pub const FIRST_FREE_CHUNK_LIST: u16 = 0;
 
-// FIRST_FREE_CHUNK_LIST + BIG_SIZE
+/// FIRST_FREE_CHUNK_LIST + BIG_SIZE
 pub const LAST_BIG_CHUNK_LIST: u16 = 20;
 
 // IMAGE HANDLING
 
-// How many words are in each image page
+/// How many words are in each image page
 pub const IMAGE_PAGE_SIZE_WORDS: usize = 256;
 
-// How many bytes are in each image page
+/// How many bytes are in each image page
 pub const IMAGE_PAGE_SIZE_BYTES: usize = 512;
 
-// How many words are in the image header
+/// How many words are in the image header
 pub const IMAGE_HEADER_WORDS: usize = 256;
 
-// How many bytes are in the image header
+/// How many bytes are in the image header
 pub const IMAGE_HEADER_BYTES: usize = 512;
+
+// CONTEXT HANDLING
+
+// Shared values
+pub const SENDER_INDEX: u16 = 0;
+pub const INSTRUCTION_POINTER_INDEX: u16 = 1;
+pub const STACK_POINTER_INDEX: u16 = 2;
+
+// MethodContext only
+pub const METHOD_INDEX: u16 = 3;
+// index 4 is unused for MethodContext
+pub const RECEIVER_INDEX: u16 = 5;
+
+// BlockContext only
+pub const BLOCK_ARGUMENT_COUNT_INDEX: u16 = 3;
+pub const INITIAL_IP_INDEX: u16 = 4;
+pub const HOME_INDEX: u16 = 5;
+
+// shared again
+pub const TEMP_FRAME_START: u16 = 6;
+
+pub const LITERAL_START: u16 = 1;
