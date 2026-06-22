@@ -1212,14 +1212,14 @@ impl ObjectMemory {
     // │     RAW ACCESS      │
     // └─────────────────────┘
 
-    /// Fetch a specific word of an object, without accounting for the header offset.
+    /// Fetch a specific word of an object, accounting for the header offset.
     ///
     /// # Parameters:
     ///     * word_index (u16): The 0 indexed word that shall be fetched
     ///     * pointer (OOP): The pointer to the object
     ///
     /// # Returns:
-    ///     * u16, the raw word data
+    ///     * u16, the word data
     //
     //  see Bluebook p. 686
     //
@@ -1227,7 +1227,7 @@ impl ObjectMemory {
     //    ↑self heapChunkOf: objectPointer word: HeaderSize + wordIndex
     //
     pub fn fetch_word(&self, word_index: u16, pointer: OOP) -> u16 {
-        return self.heap_chunk_of_word(pointer, word_index);
+        return self.heap_chunk_of_word(pointer, HEADER_SIZE + word_index);
     }
 
     /// Store a specific word of an object, without accounting for the header offset.
@@ -1247,14 +1247,14 @@ impl ObjectMemory {
         self.heap_chunk_of_word_put(pointer, word_index, value);
     }
 
-    /// Fetch a specific byte of an object, without accounting for the header offset.
+    /// Fetch a specific byte of an object, accounting for the header offset.
     ///
     /// # Parameters:
     ///     * byte_index (u16): The 0 indexed byte that shall be fetched
     ///     * pointer (OOP): The pointer to the object
     ///
     /// # Returns:
-    ///     * u8, the raw byte data
+    ///     * u8, the byte data
     //
     //  see Bluebook p. 687
     //
@@ -1262,7 +1262,7 @@ impl ObjectMemory {
     //    ↑self heapChunkOf: objectPointer byte: (HeaderSize*2 + byteIndex)
     //
     pub fn fetch_byte(&self, byte_index: u16, pointer: OOP) -> u8 {
-        return self.heap_chunk_of_byte(pointer, byte_index);
+        return self.heap_chunk_of_byte(pointer, HEADER_SIZE * 2 + byte_index);
     }
 
     /// Store a specific byte of an object, without accounting for the header offset.
@@ -1666,8 +1666,9 @@ mod api_accessor_tests {
     #[test]
     fn fetch_word_returns_correct_value() {
         let mem = dummy_memory();
-        assert_eq!(mem.fetch_word(1, OOP::from_raw(0)), 0x0020);
-        assert_eq!(mem.fetch_word(3, OOP::from_raw(2)), 0xBA00);
+        // word 0 is the first body field (after the 2-word header)
+        assert_eq!(mem.fetch_word(0, OOP::from_raw(0)), 0xAAAA);
+        assert_eq!(mem.fetch_word(1, OOP::from_raw(2)), 0xBA00);
     }
 
     #[test]
@@ -1682,8 +1683,9 @@ mod api_accessor_tests {
     #[test]
     fn fetch_byte_returns_correct_value() {
         let mem = dummy_memory();
-        assert_eq!(mem.fetch_byte(3, OOP::from_raw(0)), 0x20);
-        assert_eq!(mem.fetch_byte(6, OOP::from_raw(2)), 0xBA);
+        // byte 0 is the first byte of the first body word (after the 2-word header)
+        assert_eq!(mem.fetch_byte(0, OOP::from_raw(0)), 0xAA);
+        assert_eq!(mem.fetch_byte(2, OOP::from_raw(2)), 0xBA);
     }
 
     #[test]
