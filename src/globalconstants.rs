@@ -120,3 +120,12 @@ pub const HOME_INDEX: u16 = 5;
 pub const TEMP_FRAME_START: u16 = 6;
 
 pub const LITERAL_START: u16 = 1;
+
+// Association
+pub const VALUE_INDEX: u16 = 1;
+
+// SmallInteger constants
+pub const MINUS_ONE_POINTER: u16 = 65535;
+pub const ZERO_POINTER: u16 = 1;
+pub const ONE_POINTER: u16 = 3;
+pub const TWO_POINTER: u16 = 5;

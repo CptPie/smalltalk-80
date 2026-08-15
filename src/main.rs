@@ -11,6 +11,7 @@ use crate::{
     globalconstants::{
         CLASS_METHOD_CONTEXT_POINTER, FALSE_POINTER, HEAP_SEGMENT_SIZE, IMAGE_HEADER_BYTES,
         IMAGE_PAGE_SIZE_BYTES, NIL_POINTER, SCHEDULER_ASSOCIATION_POINTER, TRUE_POINTER,
+        VALUE_INDEX,
     },
     image::Image,
     oop::OOP,
@@ -117,7 +118,7 @@ fn load_real_image(path: &str) {
     }
 
     println!("\n=== Scheduler Chain ===");
-    let scheduler = mem.fetch_pointer(1, OOP::from_raw(SCHEDULER_ASSOCIATION_POINTER));
+    let scheduler = mem.fetch_pointer(VALUE_INDEX, OOP::from_raw(SCHEDULER_ASSOCIATION_POINTER));
     let active_process = mem.fetch_pointer(1, OOP::from_raw(scheduler));
     let initial_context = mem.fetch_pointer(1, OOP::from_raw(active_process));
 
