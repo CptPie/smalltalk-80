@@ -215,7 +215,13 @@ impl Interpreter {
     //   (currentBytecode between: 160 and: 167) ifTrue: [↑self longUnconditionalJump].
     //   (currentBytecode between: 168 and: 175) ifTrue: [↑self longConditionalJump]
     fn jump_bytecode(&mut self) {
-        todo!()
+        match self.current_bytecode {
+            144..=151 => self.short_unconditional_jump(),
+            152..=159 => self.short_conditional_jump(),
+            160..=167 => self.long_unconditional_jump(),
+            168..=175 => self.long_conditional_jump(),
+            _ => unreachable!("{} is not a jump bytecode", self.current_bytecode),
+        }
     }
 
     /// Loads the interpreter's cached context registers (home_context, receiver,
@@ -845,6 +851,151 @@ impl Interpreter {
     //   self popStack
     fn pop_stack_bytecode(&mut self) {
         let _ = self.pop_stack();
+    }
+
+    /// Adds a signed displacement to the instruction pointer.
+    ///
+    /// The instruction pointer has already been advanced past the jump bytecode
+    /// and its extension byte by the time this runs, so the displacement is
+    /// relative to the byte following the whole instruction.
+    ///
+    /// # Parameters:
+    ///     * offset (i16): The displacement to add, negative to jump backwards
+    //
+    // see Bluebook p. 602
+    //
+    // jump: offset
+    //   instructionPointer ← instructionPointer + offset
+    fn jump(&mut self, offset: i16) {
+        let target = self
+            .ip
+            .checked_add_signed(offset as isize)
+            .unwrap_or_else(|| self.vm_panic("jump target before start of method"));
+        self.ip = target;
+    }
+
+    /// Extracts the displacement from the current bytecode and jumps forward by
+    /// 1 through 8 bytes.
+    //
+    // see Bluebook p. 602
+    //
+    // shortUnconditionalJump
+    //   | offset |
+    //   offset ← self extractBits: 13 to: 15 of: currentBytecode.
+    //   self jump: offset + 1
+    fn short_unconditional_jump(&mut self) {
+        let offset = Self::extract_bits(13, 15, self.current_bytecode as u16);
+        self.jump((offset + 1) as i16);
+    }
+
+    /// Combines the current bytecode's low three bits with a following byte into
+    /// an 11 bit signed displacement and jumps by it.
+    ///
+    /// The three bits carry a bias of 4, so the displacement runs from 1024 back
+    /// to 1023 forward.
+    //
+    // see Bluebook p. 602
+    //
+    // longUnconditionalJump
+    //   | offset |
+    //   offset ← self extractBits: 13 to: 15 of: currentBytecode.
+    //   self jump: offset - 4 * 256 + self fetchByte
+    //
+    // Smalltalk binary selectors bind left to right with no precedence, so the
+    // displacement is ((offset - 4) * 256) + fetchByte, not offset - (4 * 256).
+    fn long_unconditional_jump(&mut self) {
+        let offset = Self::extract_bits(13, 15, self.current_bytecode as u16) as i16;
+        let displacement = (offset - 4) * 256 + self.fetch_byte() as i16;
+        self.jump(displacement);
+    }
+
+    /// Pops the top of the stack and jumps by the given displacement if it is the
+    /// expected boolean.
+    ///
+    /// Three outcomes: the value equals the condition and the jump is taken, it is
+    /// the other boolean and control falls through, or it is not a boolean at all,
+    /// in which case it goes back on the stack as the receiver of a
+    /// #mustBeBoolean send.
+    ///
+    /// # Parameters:
+    ///     * condition (OOP): The boolean that causes the jump to be taken
+    ///     * offset (i16): The displacement to jump by
+    //
+    // see Bluebook p. 602
+    //
+    // jumpIf: condition by: offset
+    //   | boolean |
+    //   boolean ← self popStack.
+    //   boolean = condition
+    //     ifTrue: [self jump: offset]
+    //     ifFalse: [(boolean = TruePointer) | (boolean = FalsePointer)
+    //                 ifFalse: [self unPop: 1.
+    //                           self sendMustBeBoolean]]
+    fn jump_if_by(&mut self, condition: OOP, offset: i16) {
+        let boolean = self.pop_stack();
+        if boolean == condition {
+            self.jump(offset);
+        } else if !(boolean.value == TRUE_POINTER || boolean.value == FALSE_POINTER) {
+            self.un_pop(1);
+            self.send_must_be_boolean();
+        }
+    }
+
+    /// Sends #mustBeBoolean to the value a conditional jump found on the stack.
+    ///
+    /// A conditional jump is the compiled form of a message to a boolean, so a
+    /// non-boolean receiver here means an object was sent a message only booleans
+    /// understand. The interpreter reports that with #mustBeBoolean rather than
+    /// the usual #doesNotUnderstand:.
+    //
+    // see Bluebook p. 603
+    //
+    // sendMustBeBoolean
+    //   self sendSelector: MustBeBooleanSelector argumentCount: 0
+    fn send_must_be_boolean(&mut self) {
+        // TODO: finish once send_selector is done.
+        todo!();
+    }
+
+    /// Extracts the displacement from the current bytecode and jumps forward by
+    /// 1 through 8 bytes if the top of the stack is false.
+    //
+    // see Bluebook p. 603
+    //
+    // shortConditionalJump
+    //   | offset |
+    //   offset ← self extractBits: 13 to: 15 of: currentBytecode.
+    //   self jumpIf: FalsePointer by: offset + 1
+    fn short_conditional_jump(&mut self) {
+        let offset = Self::extract_bits(13, 15, self.current_bytecode as u16) as i16;
+        self.jump_if_by(OOP::from_raw(FALSE_POINTER), offset + 1);
+    }
+
+    /// Combines the current bytecode's low two bits with a following byte into a
+    /// 10 bit unsigned displacement and jumps forward by it, on true for
+    /// bytecodes 168 through 171 and on false for 172 through 175.
+    //
+    // see Bluebook p. 603
+    //
+    // longConditionalJump
+    //   | offset |
+    //   offset ← self extractBits: 14 to: 15 of: currentBytecode.
+    //   offset ← offset * 256 + self fetchByte.
+    //   (currentBytecode between: 168 and: 171)
+    //     ifTrue: [↑self jumpIf: TruePointer by: offset].
+    //   (currentBytecode between: 172 and: 175)
+    //     ifTrue: [↑self jumpIf: FalsePointer by: offset]
+    fn long_conditional_jump(&mut self) {
+        let mut offset = Self::extract_bits(14, 15, self.current_bytecode as u16) as i16;
+        offset = offset * 256 + self.fetch_byte() as i16;
+        match self.current_bytecode {
+            168..=171 => self.jump_if_by(OOP::from_raw(TRUE_POINTER), offset),
+            172..=175 => self.jump_if_by(OOP::from_raw(FALSE_POINTER), offset),
+            _ => unreachable!(
+                "Bytecode {} is not a long conditional jump",
+                self.current_bytecode
+            ),
+        }
     }
 }
 
@@ -1671,5 +1822,162 @@ mod tests {
 
         assert_eq!(interpreter.stack_top().integer_value_of(), Ok(71));
         assert_eq!(interpreter.sp, EMPTY_STACK_SP + 1);
+    }
+
+    // ┌─────────────────────┐
+    // │        JUMPS        │
+    // └─────────────────────┘
+
+    // A jump's displacement is measured from the byte after the whole
+    // instruction, since the bytecode and any extension byte are consumed
+    // before the displacement is applied. These name the two instruction
+    // widths so the expected ip reads as "past the instruction, then jump".
+    const AFTER_ONE_BYTE: usize = FIRST_BYTECODE_BYTE as usize + 1;
+    const AFTER_TWO_BYTES: usize = FIRST_BYTECODE_BYTE as usize + 2;
+
+    #[test]
+    fn short_unconditional_jump_advances_one_to_eight() {
+        for (bytecode, displacement) in (144u8..=151).zip(1usize..=8) {
+            let mut interpreter = Fixture::new().bytecodes(&[bytecode]).build();
+
+            interpreter.cycle();
+
+            assert_eq!(
+                interpreter.ip,
+                AFTER_ONE_BYTE + displacement,
+                "bytecode {bytecode}"
+            );
+        }
+    }
+
+    #[test]
+    fn long_unconditional_jump_spans_the_full_signed_range() {
+        // The displacement is (bits - 4) * 256 + extension. The bias is what
+        // makes the range signed, and reading the book's `offset - 4 * 256`
+        // with C precedence instead of Smalltalk's left to right would turn
+        // every one of these into a large jump backwards.
+        for (bytecode, extension, displacement) in [
+            (163u8, 250u8, -6i64),
+            (164, 0, 0),
+            (164, 255, 255),
+            (166, 10, 522),
+            (167, 255, 1023), // the furthest forward a long jump reaches
+        ] {
+            let mut interpreter = Fixture::new().bytecodes(&[bytecode, extension]).build();
+
+            interpreter.cycle();
+
+            assert_eq!(
+                interpreter.ip as i64,
+                AFTER_TWO_BYTES as i64 + displacement,
+                "bytecode {bytecode} extension {extension}"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "jump target before start of method")]
+    fn a_jump_before_the_start_of_the_method_is_rejected() {
+        // 160 with extension 0 is the full 1024 bytes back, further than this
+        // fixture's bytecodes begin.
+        let mut interpreter = Fixture::new().bytecodes(&[160, 0]).build();
+
+        interpreter.cycle();
+    }
+
+    #[test]
+    fn short_conditional_jump_is_taken_when_the_top_is_false() {
+        // 114 push false, then each of the eight short conditional jumps.
+        for (bytecode, displacement) in (152u8..=159).zip(1usize..=8) {
+            let mut interpreter = Fixture::new().bytecodes(&[114, bytecode]).build();
+
+            interpreter.cycle();
+            interpreter.cycle();
+
+            assert_eq!(
+                interpreter.ip,
+                AFTER_TWO_BYTES + displacement,
+                "bytecode {bytecode}"
+            );
+            assert_eq!(interpreter.sp, EMPTY_STACK_SP, "the boolean is popped");
+        }
+    }
+
+    #[test]
+    fn short_conditional_jump_falls_through_when_the_top_is_true() {
+        // 113 push true, 152 short conditional jump. The short form tests for
+        // false, so true means carry on -- and the boolean is consumed either
+        // way, which is the half a "does the jump work" test would miss.
+        let mut interpreter = Fixture::new().bytecodes(&[113, 152]).build();
+
+        interpreter.cycle();
+        interpreter.cycle();
+
+        assert_eq!(interpreter.ip, AFTER_TWO_BYTES, "no displacement applied");
+        assert_eq!(
+            interpreter.sp, EMPTY_STACK_SP,
+            "the boolean is still popped"
+        );
+    }
+
+    #[test]
+    fn long_conditional_jump_tests_true_below_172_and_false_above() {
+        // Push the boolean each bytecode tests for, so every case jumps. The
+        // displacement is the low two bits times 256 plus the extension; 172
+        // is the case that pins the field at two bits, since its low three
+        // would read as 4 and send the jump 1024 bytes further on.
+        for (bytecode, push) in [(168u8, 113u8), (171, 113), (172, 114), (175, 114)] {
+            let displacement = (bytecode & 3) as usize * 256 + 7;
+            let mut interpreter = Fixture::new().bytecodes(&[push, bytecode, 7]).build();
+
+            interpreter.cycle();
+            interpreter.cycle();
+
+            assert_eq!(
+                interpreter.ip,
+                FIRST_BYTECODE_BYTE as usize + 3 + displacement,
+                "bytecode {bytecode}"
+            );
+        }
+    }
+
+    #[test]
+    fn long_conditional_jump_falls_through_on_the_other_boolean() {
+        // 168 tests for true and 172 for false, so each is given the boolean it
+        // does not want. The ip assertion also pins that the extension byte is
+        // consumed on the path where the jump is not taken.
+        for (bytecode, push) in [(168u8, 114u8), (172, 113)] {
+            let mut interpreter = Fixture::new().bytecodes(&[push, bytecode, 7]).build();
+
+            interpreter.cycle();
+            interpreter.cycle();
+
+            assert_eq!(
+                interpreter.ip,
+                FIRST_BYTECODE_BYTE as usize + 3,
+                "bytecode {bytecode} consumed its extension byte but did not jump"
+            );
+            assert_eq!(interpreter.sp, EMPTY_STACK_SP);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "not yet implemented")]
+    fn a_conditional_jump_on_a_non_boolean_reaches_must_be_boolean() {
+        // 32 push literal constant 0, a SmallInteger, then 152. Neither true nor
+        // false, so the value goes back on the stack as the receiver of a
+        // #mustBeBoolean send.
+        //
+        // That send is still todo!(), which is what this asserts on. Once
+        // sendSelector:argumentCount: exists, replace the expectation with a
+        // real one: message_selector is MUST_BE_BOOLEAN_SELECTOR, argument_count
+        // is 0, and the un_pop has put the value back on the stack.
+        let mut interpreter = Fixture::new()
+            .literal(0, small_int(1))
+            .bytecodes(&[32, 152])
+            .build();
+
+        interpreter.cycle();
+        interpreter.cycle();
     }
 }
