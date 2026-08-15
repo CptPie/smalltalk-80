@@ -130,3 +130,17 @@ pub const MINUS_ONE_POINTER: u16 = 65535;
 pub const ZERO_POINTER: u16 = 1;
 pub const ONE_POINTER: u16 = 3;
 pub const TWO_POINTER: u16 = 5;
+
+// Class indecies (p. 587)
+pub const SUPERCLASS_INDEX: u16 = 0;
+pub const MESSAGE_DICTIONARY_INDEX: u16 = 1;
+pub const INSTANCE_SPECIFICATION_INDEX: u16 = 2;
+
+// MessageDictionary
+pub const METHOD_ARRAY_INDEX: u16 = 1;
+pub const SELECTOR_START: u16 = 2;
+
+// Message (p. 590)
+pub const MESSAGE_SELECTOR_INDEX: u16 = 0;
+pub const MESSAGE_ARGUMENTS_INDEX: u16 = 1;
+pub const MESSAGE_SIZE: u16 = 2;

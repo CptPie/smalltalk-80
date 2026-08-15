@@ -1,9 +1,11 @@
 use crate::{
     globalconstants::{
-        FALSE_POINTER, HEADER_INDEX, HOME_INDEX, INSTRUCTION_POINTER_INDEX, LITERAL_START,
-        METHOD_INDEX, MINUS_ONE_POINTER, NIL_POINTER, ONE_POINTER, RECEIVER_INDEX,
-        STACK_POINTER_INDEX, TEMP_FRAME_START, TRUE_POINTER, TWO_POINTER, VALUE_INDEX,
-        ZERO_POINTER,
+        CLASS_ARRAY_POINTER, CLASS_MESSAGE_POINTER, DOES_NOT_UNDERSTAND_SELECTOR, FALSE_POINTER,
+        HEADER_INDEX, HOME_INDEX, INSTRUCTION_POINTER_INDEX, LITERAL_START,
+        MESSAGE_ARGUMENTS_INDEX, MESSAGE_DICTIONARY_INDEX, MESSAGE_SELECTOR_INDEX, MESSAGE_SIZE,
+        METHOD_ARRAY_INDEX, METHOD_INDEX, MINUS_ONE_POINTER, NIL_POINTER, ONE_POINTER,
+        RECEIVER_INDEX, SELECTOR_START, STACK_POINTER_INDEX, SUPERCLASS_INDEX, TEMP_FRAME_START,
+        TRUE_POINTER, TWO_POINTER, VALUE_INDEX, ZERO_POINTER,
     },
     objectmemory::ObjectMemory,
     oop::OOP,
@@ -788,6 +790,271 @@ impl Interpreter {
         OOP::from_raw(self.memory.fetch_pointer(VALUE_INDEX, association))
     }
 
+    /// Moves a run of object pointers from one object to another, leaving nil
+    /// behind in every field it read.
+    ///
+    /// Nilling the source is not tidiness: the fields being moved are the
+    /// receiver and arguments on a context's stack, and clearing them keeps the
+    /// reference counts right once the sending context is discarded.
+    ///
+    /// # Parameters:
+    ///     * count (u16): How many pointers to move
+    ///     * first_from (u16): The first field index to read
+    ///     * from_oop (OOP): The object to read from
+    ///     * first_to (u16): The first field index to write
+    ///     * to_oop (OOP): The object to write to
+    //
+    // see Bluebook pp. 574-575
+    //
+    // transfer: count fromIndex: firstFrom ofObject: fromOop
+    //           toIndex: firstTo ofObject: toOop
+    //   | fromIndex toIndex lastFrom oop |
+    //   fromIndex ← firstFrom.
+    //   lastFrom ← firstFrom + count.
+    //   toIndex ← firstTo.
+    //   [fromIndex < lastFrom] whileTrue:
+    //     [oop ← memory fetchPointer: fromIndex ofObject: fromOop.
+    //      memory storePointer: toIndex ofObject: toOop withValue: oop.
+    //      memory storePointer: fromIndex ofObject: fromOop withValue: NilPointer.
+    //      fromIndex ← fromIndex + 1.
+    //      toIndex ← toIndex + 1]
+    fn transfer(&mut self, count: u16, first_from: u16, from_oop: OOP, first_to: u16, to_oop: OOP) {
+        let mut from_index = first_from;
+        let last_from = first_from + count;
+        let mut to_index = first_to;
+        while from_index < last_from {
+            let oop = self.memory.fetch_pointer(from_index, from_oop);
+            self.memory.store_pointer(to_index, to_oop, oop);
+            self.memory.store_pointer(from_index, from_oop, NIL_POINTER);
+            from_index += 1;
+            to_index += 1
+        }
+    }
+
+    /// Hashes an object pointer for the message dictionary probe.
+    ///
+    /// Selectors are Symbols, which compare by identity, so the pointer itself is
+    /// already a serviceable hash. Shifting off the low bit improves it, since
+    /// every pointer that is not a SmallInteger is even.
+    ///
+    /// # Parameters:
+    ///     * object_pointer (OOP): The pointer to hash
+    ///
+    /// # Returns:
+    ///     * u16, the hash value
+    //
+    // see Bluebook p. 587
+    //
+    // hash: objectPointer
+    //   ↑objectPointer bitShift: -1
+    fn hash(object_pointer: OOP) -> u16 {
+        object_pointer.value >> 1
+    }
+
+    /// Searches one message dictionary for message_selector.
+    ///
+    /// On success this stores the CompiledMethod in new_method and its primitive
+    /// index in primitive_index, so it reports only whether the search succeeded.
+    ///
+    /// A message dictionary is an IdentityDictionary: the selectors live in the
+    /// dictionary's own indexable fields from SelectorStart on, and the methods in
+    /// a parallel Array at MethodArrayIndex, at the same position minus
+    /// SelectorStart. The selector region is a power of two long, so the modulo
+    /// reduction is a bitwise and.
+    ///
+    /// The probe walks forward from the hashed index and stops at a nil, wrapping
+    /// once at the end. Wrapping twice means the dictionary is full and has no
+    /// nil to terminate on, which is the only other way out of the loop.
+    ///
+    /// # Parameters:
+    ///     * dictionary (OOP): The message dictionary to search
+    ///
+    /// # Returns:
+    ///     * bool, true if the selector was found
+    //
+    // see Bluebook p. 588
+    //
+    // lookupMethodInDictionary: dictionary
+    //   | length index mask wrapAround nextSelector methodArray |
+    //   length ← memory fetchWordLengthOf: dictionary.
+    //   mask ← length - SelectorStart - 1.
+    //   index ← (mask bitAnd: (self hash: messageSelector)) + SelectorStart.
+    //   wrapAround ← false.
+    //   [true] whileTrue:
+    //     [nextSelector ← memory fetchPointer: index ofObject: dictionary.
+    //      nextSelector = NilPointer ifTrue: [↑false].
+    //      nextSelector = messageSelector
+    //        ifTrue: [methodArray ← memory fetchPointer: MethodArrayIndex
+    //                                      ofObject: dictionary.
+    //                 newMethod ← memory fetchPointer: index - SelectorStart
+    //                                    ofObject: methodArray.
+    //                 primitiveIndex ← self primitiveIndexOf: newMethod.
+    //                 ↑true].
+    //      index ← index + 1.
+    //      index = length
+    //        ifTrue: [wrapAround ifTrue: [↑false].
+    //                 wrapAround ← true.
+    //                 index ← SelectorStart]]
+    fn lookup_method_in_dictionary(&mut self, dictionary: OOP) -> bool {
+        let length = self.memory.fetch_word_length_of(dictionary);
+        let mask = length
+            .checked_sub(SELECTOR_START + 1)
+            .unwrap_or_else(|| self.vm_panic("message dictionary small than its own fixed fields"));
+        let mut index = (mask & Self::hash(self.message_selector)) + SELECTOR_START;
+        let mut wrap_around = false;
+        loop {
+            let next_selector = self.memory.fetch_pointer(index, dictionary);
+            if next_selector == NIL_POINTER {
+                return false;
+            }
+            if next_selector == self.message_selector.value {
+                let method_array = self.memory.fetch_pointer(METHOD_ARRAY_INDEX, dictionary);
+                self.new_method = OOP::from_raw(
+                    self.memory
+                        .fetch_pointer(index - SELECTOR_START, OOP::from_raw(method_array)),
+                );
+                self.primitive_index = self.primitive_index_of(self.new_method) as u8;
+                return true;
+            }
+            index += 1;
+            if index == length {
+                if wrap_around {
+                    return false;
+                }
+                wrap_around = true;
+                index = SELECTOR_START;
+            }
+        }
+    }
+
+    /// Finds the method a class associates with message_selector, walking up the
+    /// superclass chain until it is found or the chain runs out.
+    ///
+    /// When the chain runs out the message is not understood. Rather than fail,
+    /// the interpreter packages the original message into a Message object and
+    /// looks the whole thing up again as #doesNotUnderstand:, starting over from
+    /// the original class. Object implements that, and a user class may override
+    /// it, so this always finishes with a CompiledMethod in new_method.
+    ///
+    /// Failing to find #doesNotUnderstand: itself means the image is unusable.
+    ///
+    /// # Parameters:
+    ///     * class (OOP): The class to begin the lookup in
+    ///
+    /// # Returns:
+    ///     * bool, true once a method has been found
+    //
+    // see Bluebook p. 589
+    //
+    // lookupMethodInClass: class
+    //   | currentClass dictionary |
+    //   currentClass ← class.
+    //   [currentClass ~= NilPointer] whileTrue:
+    //     [dictionary ← memory fetchPointer: MessageDictionaryIndex
+    //                          ofObject: currentClass.
+    //      (self lookupMethodInDictionary: dictionary) ifTrue: [↑true].
+    //      currentClass ← self superclassOf: currentClass].
+    //   messageSelector = DoesNotUnderstandSelector
+    //     ifTrue: [self error: 'Recursive not understood error encountered'].
+    //   self createActualMessage.
+    //   messageSelector ← DoesNotUnderstandSelector.
+    //   ↑self lookupMethodInClass: class
+    fn lookup_method_in_class(&mut self, class: OOP) -> bool {
+        let mut current_class = class;
+        while current_class.value != NIL_POINTER {
+            let dictionary = OOP::from_raw(
+                self.memory
+                    .fetch_pointer(MESSAGE_DICTIONARY_INDEX, current_class),
+            );
+            if self.lookup_method_in_dictionary(dictionary) {
+                return true;
+            }
+            current_class = self.superclass_of(current_class);
+        }
+        if self.message_selector.value == DOES_NOT_UNDERSTAND_SELECTOR {
+            self.vm_panic("Recursive not understood error encountered")
+        }
+        self.create_actual_message();
+        self.message_selector = OOP::from_raw(DOES_NOT_UNDERSTAND_SELECTOR);
+        self.lookup_method_in_class(class)
+    }
+
+    /// Returns a class's superclass, or nil at the top of the chain.
+    ///
+    /// # Parameters:
+    ///     * class_pointer (OOP): The class to read the superclass of
+    ///
+    /// # Returns:
+    ///     * OOP, the superclass, nil for Object
+    //
+    // see Bluebook p. 589
+    //
+    // superclassOf: classPointer
+    //   ↑memory fetchPointer: SuperclassIndex ofObject: classPointer
+    fn superclass_of(&self, class_pointer: OOP) -> OOP {
+        OOP::from_raw(self.memory.fetch_pointer(SUPERCLASS_INDEX, class_pointer))
+    }
+
+    /// Allocates a pointer object, stopping the VM if there is no memory left.
+    ///
+    /// ObjectMemory has already compacted and tried every segment by the time it
+    /// reports failure, so there is nothing left to recover with, and no Smalltalk
+    /// level way to signal it from the middle of a send.
+    //
+    // This is a helper not documented in the bluebook.
+    fn instantiate_pointers(&mut self, class: u16, length: u16) -> OOP {
+        match self.memory.instantiate_class_with_pointers(class, length) {
+            Ok(oop) => oop,
+            Err(_) => self.vm_panic("out of memory"),
+        }
+    }
+
+    /// Repackages the message currently on the stack into a Message object, so it
+    /// can be passed as the single argument of #doesNotUnderstand:.
+    ///
+    /// The arguments move off the active context's stack into a fresh Array, the
+    /// Array and the selector go into a Message, and the Message replaces the
+    /// arguments on the stack. The send that follows therefore has one argument
+    /// whatever the original message took, which is why argument_count is reset.
+    //
+    // see Bluebook pp. 589-590
+    //
+    // createActualMessage
+    //   | argumentArray message |
+    //   argumentArray ← memory instantiateClass: ClassArrayPointer
+    //                          withPointers: argumentCount.
+    //   message ← memory instantiateClass: ClassMessagePointer
+    //                    withPointers: self messageSize.
+    //   memory storePointer: MessageSelectorIndex ofObject: message
+    //          withValue: messageSelector.
+    //   memory storePointer: MessageArgumentsIndex ofObject: message
+    //          withValue: argumentArray.
+    //   self transfer: argumentCount
+    //        fromIndex: stackPointer-(argumentCount-1) ofObject: activeContext
+    //        toIndex: 0 ofObject: argumentArray.
+    //   self pop: argumentCount.
+    //   self push: message.
+    //   argumentCount ← 1
+    fn create_actual_message(&mut self) {
+        let argument_array =
+            self.instantiate_pointers(CLASS_ARRAY_POINTER, self.argument_count as u16);
+        let message = self.instantiate_pointers(CLASS_MESSAGE_POINTER, MESSAGE_SIZE);
+        self.memory
+            .store_pointer(MESSAGE_SELECTOR_INDEX, message, self.message_selector.value);
+        self.memory
+            .store_pointer(MESSAGE_ARGUMENTS_INDEX, message, argument_array.value);
+        self.transfer(
+            self.argument_count as u16,
+            (self.sp + 1 - self.argument_count as usize) as u16,
+            self.active_context,
+            0,
+            argument_array,
+        );
+        self.pop(self.argument_count as usize);
+        self.push(message);
+        self.argument_count = 1
+    }
+
     /// Extracts the receiver-variable field index from the current bytecode and
     /// pushes that instance variable onto the stack.
     //
@@ -1274,7 +1541,10 @@ impl Interpreter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::globalconstants::{HEADER_SIZE, SENDER_INDEX};
+    use crate::globalconstants::{
+        BIG_SIZE, FIRST_FREE_CHUNK_LIST, HEADER_SIZE, LAST_BIG_CHUNK_LIST, NON_POINTER,
+        SENDER_INDEX,
+    };
     use crate::objectmemory::ObjectMemory;
     use crate::oop::OOP;
 
@@ -1293,6 +1563,11 @@ mod tests {
     // Tag a value as a SmallInteger object pointer (low bit set).
     fn small_int(value: u16) -> u16 {
         (value << 1) | 1
+    }
+
+    // The same, as an OOP.
+    fn small_int_oop(value: u16) -> OOP {
+        OOP::from_raw(small_int(value))
     }
 
     #[test]
@@ -1375,11 +1650,57 @@ mod tests {
     //   OOP 18  context      MethodContext: fixed fields, temp frame, then stack
     //   OOP 20  method       CompiledMethod: header, literal frame, bytecodes
     //   OOP 22  association  key at field 0, value at field 1
+    //
+    // The lookup tests add a two step class chain, each class with its own
+    // message dictionary and parallel method Array:
+    //
+    //   OOP 64  subclass     superclass -> 66, dictionary -> 68
+    //   OOP 66  superclass   superclass -> nil, dictionary -> 70
+    //   OOP 68  dictionary   tally, method array -> 72, SELECTOR_SLOTS selectors
+    //   OOP 70  dictionary   tally, method array -> 74, SELECTOR_SLOTS selectors
+    //   OOP 72  method array of the subclass's dictionary
+    //   OOP 74  method array of the superclass's dictionary
+    //   OOP 76  method X,  78  method Y,  80  the doesNotUnderstand: method
+    //   OOP 82  selector one, 84 selector two, 86 a selector never installed,
+    //   OOP 98  a selector chosen to collide with 82
+    //
+    // OOPs 16 through 22 overlap some of the guaranteed class pointers, so the
+    // Array and Message that createActualMessage allocates come out with the
+    // fixture's own objects as their class. Nothing reads those class fields
+    // here, but do not add a test that does.
 
     const RECEIVER_OOP: u16 = 16;
     const CONTEXT_OOP: u16 = 18;
     const METHOD_OOP: u16 = 20;
     const ASSOCIATION_OOP: u16 = 22;
+
+    const SUBCLASS_OOP: u16 = 64;
+    const SUPERCLASS_OOP: u16 = 66;
+    const SUBCLASS_DICTIONARY_OOP: u16 = 68;
+    const SUPERCLASS_DICTIONARY_OOP: u16 = 70;
+    const SUBCLASS_METHODS_OOP: u16 = 72;
+    const SUPERCLASS_METHODS_OOP: u16 = 74;
+    const METHOD_X_OOP: u16 = 76;
+    const METHOD_Y_OOP: u16 = 78;
+    const METHOD_DNU_OOP: u16 = 80;
+
+    // Selector OOPs are only ever compared and hashed, never dereferenced, so
+    // what matters is their numeric value. hash is the pointer shifted right one
+    // and the slot is (mask & hash) + SelectorStart, so with eight slots 82 and
+    // 98 both land on slot 3 and exercise the linear probe.
+    //
+    // 62 hashes into the last slot. That matters: (mask & hash) + SelectorStart
+    // and the mis-parenthesised mask & (hash + SelectorStart) agree for every
+    // hash whose low three bits are 5 or less, so only a selector at the top of
+    // the region can tell a correct probe from that mistake.
+    const SELECTOR_ONE_OOP: u16 = 82;
+    const SELECTOR_TWO_OOP: u16 = 62;
+    const SELECTOR_ABSENT_OOP: u16 = 86;
+    const SELECTOR_COLLIDES_WITH_ONE_OOP: u16 = 98;
+
+    /// Selector slots per message dictionary. Must be a power of two: the probe
+    /// reduces the hash modulo this by masking, which is only correct then.
+    const SELECTOR_SLOTS: u16 = 8;
 
     // Sized past what the single byte forms can address, so the extended
     // bytecodes have somewhere to reach that the short ones cannot: the short
@@ -1395,13 +1716,40 @@ mod tests {
     /// not of the fixture's size.
     const SHORT_STORE_COUNT: u8 = 8;
 
-    const NIL_LOCATION: u16 = 10;
-    const FALSE_LOCATION: u16 = 14;
-    const TRUE_LOCATION: u16 = 18;
+    // Heap words 0 through LAST_BIG_CHUNK_LIST are the free chunk list heads, so
+    // every object has to start above them for allocation to work.
+    const NIL_LOCATION: u16 = 24;
+    const FALSE_LOCATION: u16 = 28;
+    const TRUE_LOCATION: u16 = 32;
     const RECEIVER_LOCATION: u16 = 100;
     const CONTEXT_LOCATION: u16 = 200;
     const METHOD_LOCATION: u16 = 300;
     const ASSOCIATION_LOCATION: u16 = 400;
+    const SUBCLASS_LOCATION: u16 = 420;
+    const SUPERCLASS_LOCATION: u16 = 430;
+    const SUBCLASS_DICTIONARY_LOCATION: u16 = 440;
+    const SUPERCLASS_DICTIONARY_LOCATION: u16 = 460;
+    const SUBCLASS_METHODS_LOCATION: u16 = 480;
+    const SUPERCLASS_METHODS_LOCATION: u16 = 500;
+    const METHOD_X_LOCATION: u16 = 520;
+    const METHOD_Y_LOCATION: u16 = 530;
+    const METHOD_DNU_LOCATION: u16 = 540;
+    const SELECTOR_ONE_LOCATION: u16 = 550;
+    const SELECTOR_TWO_LOCATION: u16 = 560;
+    const SELECTOR_ABSENT_LOCATION: u16 = 570;
+    const SELECTOR_COLLIDES_LOCATION: u16 = 580;
+    const DNU_SELECTOR_LOCATION: u16 = 590;
+
+    /// A single free chunk covering the tail of the segment, so that the object
+    /// memory has somewhere to allocate from. Large enough to land on the big
+    /// chunk list, which is where attemptToAllocateChunkInCurrentSegment falls
+    /// through to once the exact fit list comes up empty.
+    const FREE_CHUNK_LOCATION: u16 = 800;
+    const FREE_CHUNK_SIZE: u16 = 200;
+
+    /// The first object table entry left free for allocation, and how many.
+    const FIRST_FREE_ENTRY: u16 = 100;
+    const FREE_ENTRY_COUNT: u16 = 13;
 
     /// Byte offset of the first bytecode: the header plus the literal frame, at
     /// two bytes per word. Also the interpreter's initial ip.
@@ -1445,8 +1793,8 @@ mod tests {
         }
 
         fn new() -> Self {
-            let mut ot = vec![0u16; 32];
-            let mut seg = vec![0u16; 512];
+            let mut ot = vec![0u16; 128];
+            let mut seg = vec![0u16; 1024];
 
             Self::place(&mut ot, &mut seg, NIL_POINTER, NIL_LOCATION, 2);
             Self::place(&mut ot, &mut seg, FALSE_POINTER, FALSE_LOCATION, 2);
@@ -1473,6 +1821,126 @@ mod tests {
                 1 + LITERAL_COUNT + BYTECODE_WORDS,
             );
             Self::place(&mut ot, &mut seg, ASSOCIATION_OOP, ASSOCIATION_LOCATION, 2);
+
+            // The class chain and its message dictionaries.
+            Self::place(&mut ot, &mut seg, SUBCLASS_OOP, SUBCLASS_LOCATION, 3);
+            Self::place(&mut ot, &mut seg, SUPERCLASS_OOP, SUPERCLASS_LOCATION, 3);
+            Self::place(
+                &mut ot,
+                &mut seg,
+                SUBCLASS_DICTIONARY_OOP,
+                SUBCLASS_DICTIONARY_LOCATION,
+                SELECTOR_START + SELECTOR_SLOTS,
+            );
+            Self::place(
+                &mut ot,
+                &mut seg,
+                SUPERCLASS_DICTIONARY_OOP,
+                SUPERCLASS_DICTIONARY_LOCATION,
+                SELECTOR_START + SELECTOR_SLOTS,
+            );
+            Self::place(
+                &mut ot,
+                &mut seg,
+                SUBCLASS_METHODS_OOP,
+                SUBCLASS_METHODS_LOCATION,
+                SELECTOR_SLOTS,
+            );
+            Self::place(
+                &mut ot,
+                &mut seg,
+                SUPERCLASS_METHODS_OOP,
+                SUPERCLASS_METHODS_LOCATION,
+                SELECTOR_SLOTS,
+            );
+
+            // Three CompiledMethods to find. X and the doesNotUnderstand: one
+            // carry a plain header; Y has flag value 7 so that a lookup can be
+            // checked for picking up a primitive index.
+            Self::place(&mut ot, &mut seg, METHOD_X_OOP, METHOD_X_LOCATION, 1);
+            Self::place(&mut ot, &mut seg, METHOD_Y_OOP, METHOD_Y_LOCATION, 3);
+            Self::place(&mut ot, &mut seg, METHOD_DNU_OOP, METHOD_DNU_LOCATION, 1);
+            seg[(METHOD_X_LOCATION + HEADER_SIZE) as usize] = method_header(0, 0, false, 0);
+            seg[(METHOD_Y_LOCATION + HEADER_SIZE) as usize] = method_header(7, 0, false, 2);
+            seg[(METHOD_Y_LOCATION + HEADER_SIZE + LITERAL_START) as usize] =
+                header_extension(1, 70);
+            seg[(METHOD_DNU_LOCATION + HEADER_SIZE) as usize] = method_header(1, 0, false, 0);
+
+            // Selectors. Only their OOP values matter to the probe, but they need
+            // object table entries because storing one into a Message counts it up.
+            Self::place(
+                &mut ot,
+                &mut seg,
+                SELECTOR_ONE_OOP,
+                SELECTOR_ONE_LOCATION,
+                2,
+            );
+            Self::place(
+                &mut ot,
+                &mut seg,
+                SELECTOR_TWO_OOP,
+                SELECTOR_TWO_LOCATION,
+                2,
+            );
+            Self::place(
+                &mut ot,
+                &mut seg,
+                SELECTOR_ABSENT_OOP,
+                SELECTOR_ABSENT_LOCATION,
+                2,
+            );
+            Self::place(
+                &mut ot,
+                &mut seg,
+                SELECTOR_COLLIDES_WITH_ONE_OOP,
+                SELECTOR_COLLIDES_LOCATION,
+                2,
+            );
+            Self::place(
+                &mut ot,
+                &mut seg,
+                DOES_NOT_UNDERSTAND_SELECTOR,
+                DNU_SELECTOR_LOCATION,
+                2,
+            );
+
+            // The receiver's class, so that fetchClassOf reaches the chain.
+            seg[(RECEIVER_LOCATION + 1) as usize] = SUBCLASS_OOP;
+
+            seg[(SUBCLASS_LOCATION + HEADER_SIZE + SUPERCLASS_INDEX) as usize] = SUPERCLASS_OOP;
+            seg[(SUBCLASS_LOCATION + HEADER_SIZE + MESSAGE_DICTIONARY_INDEX) as usize] =
+                SUBCLASS_DICTIONARY_OOP;
+            seg[(SUPERCLASS_LOCATION + HEADER_SIZE + SUPERCLASS_INDEX) as usize] = NIL_POINTER;
+            seg[(SUPERCLASS_LOCATION + HEADER_SIZE + MESSAGE_DICTIONARY_INDEX) as usize] =
+                SUPERCLASS_DICTIONARY_OOP;
+
+            // Both dictionaries start empty. The probe stops on nil, so the
+            // selector slots must hold nil rather than the SmallInteger that
+            // place leaves behind.
+            for (dictionary, methods) in [
+                (SUBCLASS_DICTIONARY_LOCATION, SUBCLASS_METHODS_OOP),
+                (SUPERCLASS_DICTIONARY_LOCATION, SUPERCLASS_METHODS_OOP),
+            ] {
+                seg[(dictionary + HEADER_SIZE + METHOD_ARRAY_INDEX) as usize] = methods;
+                for slot in 0..SELECTOR_SLOTS {
+                    seg[(dictionary + HEADER_SIZE + SELECTOR_START + slot) as usize] = NIL_POINTER;
+                }
+            }
+
+            // Free chunk list heads are empty, then one big chunk is threaded
+            // onto the big list so that instantiateClass has somewhere to go.
+            for list in FIRST_FREE_CHUNK_LIST..=LAST_BIG_CHUNK_LIST {
+                seg[list as usize] = NON_POINTER;
+            }
+            seg[FREE_CHUNK_LOCATION as usize] = FREE_CHUNK_SIZE;
+            seg[(FREE_CHUNK_LOCATION + 1) as usize] = NON_POINTER;
+            seg[(FIRST_FREE_CHUNK_LIST + BIG_SIZE) as usize] = FREE_CHUNK_LOCATION;
+
+            // Object table entries reserved for allocation. rebuild_free_pointer_list
+            // threads exactly those entries whose free bit is set.
+            for entry in 0..FREE_ENTRY_COUNT {
+                ot[(FIRST_FREE_ENTRY + entry * 2) as usize] = 0x20;
+            }
 
             // The active MethodContext. ip and sp are stored the way the image
             // stores them: ip 1-relative, sp relative to the temp frame start.
@@ -1539,8 +2007,48 @@ mod tests {
             self
         }
 
+        /// Installs a selector and its CompiledMethod in a message dictionary,
+        /// at the slot the probe will look in.
+        ///
+        /// The slot is computed here rather than by calling the interpreter, so a
+        /// wrong index calculation in lookupMethodInDictionary shows up as a
+        /// missed lookup instead of both sides agreeing on the wrong answer.
+        fn dictionary_entry(
+            &mut self,
+            dictionary_location: u16,
+            methods_location: u16,
+            selector: u16,
+            method: u16,
+        ) -> &mut Self {
+            let mask = SELECTOR_SLOTS - 1;
+            let mut slot = (mask & (selector >> 1)) + SELECTOR_START;
+            // Linear probe past anything already installed, as the compiler would.
+            while self.seg[(dictionary_location + HEADER_SIZE + slot) as usize] != NIL_POINTER {
+                slot += 1;
+                if slot == SELECTOR_START + SELECTOR_SLOTS {
+                    slot = SELECTOR_START;
+                }
+            }
+            self.seg[(dictionary_location + HEADER_SIZE + slot) as usize] = selector;
+            self.seg[(methods_location + HEADER_SIZE + slot - SELECTOR_START) as usize] = method;
+            self
+        }
+
+        /// Fills every selector slot of a dictionary, leaving no nil to stop the
+        /// probe. The only remaining exit is wrapping around twice.
+        fn fill_dictionary(&mut self, dictionary_location: u16) -> &mut Self {
+            for slot in 0..SELECTOR_SLOTS {
+                // Values that are not any fixture selector, and stay even so they
+                // never look like a SmallInteger.
+                self.seg[(dictionary_location + HEADER_SIZE + SELECTOR_START + slot) as usize] =
+                    200 + slot * 2;
+            }
+            self
+        }
+
         fn build(&self) -> Interpreter {
-            let memory = ObjectMemory::from_image(vec![self.seg.clone()], self.ot.clone());
+            let mut memory = ObjectMemory::from_image(vec![self.seg.clone()], self.ot.clone());
+            memory.rebuild_free_pointer_list();
             Interpreter::new(memory, OOP::from_raw(CONTEXT_OOP))
         }
     }
@@ -2464,5 +2972,262 @@ mod tests {
         let interpreter = Fixture::new().header(method_header(0, 0, false, 0)).build();
 
         interpreter.method_class_of(method());
+    }
+
+    // ┌─────────────────────┐
+    // │    METHOD LOOKUP    │
+    // └─────────────────────┘
+
+    /// Installs a selector in the subclass's dictionary.
+    fn in_subclass(fixture: &mut Fixture, selector: u16, method: u16) -> &mut Fixture {
+        fixture.dictionary_entry(
+            SUBCLASS_DICTIONARY_LOCATION,
+            SUBCLASS_METHODS_LOCATION,
+            selector,
+            method,
+        )
+    }
+
+    /// Installs a selector in the superclass's dictionary.
+    fn in_superclass(fixture: &mut Fixture, selector: u16, method: u16) -> &mut Fixture {
+        fixture.dictionary_entry(
+            SUPERCLASS_DICTIONARY_LOCATION,
+            SUPERCLASS_METHODS_LOCATION,
+            selector,
+            method,
+        )
+    }
+
+    #[test]
+    fn transfer_moves_the_pointers_and_nils_the_source() {
+        let mut interpreter = Fixture::new()
+            .instance_variable(0, small_int(10))
+            .instance_variable(1, small_int(11))
+            .instance_variable(2, small_int(12))
+            .build();
+
+        interpreter.transfer(
+            2,
+            0,
+            OOP::from_raw(RECEIVER_OOP),
+            3,
+            OOP::from_raw(SUBCLASS_METHODS_OOP),
+        );
+
+        assert_eq!(
+            field_of(&interpreter, SUBCLASS_METHODS_OOP, 3).integer_value_of(),
+            Ok(10)
+        );
+        assert_eq!(
+            field_of(&interpreter, SUBCLASS_METHODS_OOP, 4).integer_value_of(),
+            Ok(11)
+        );
+        // Nilling the source is what keeps the reference counts right once the
+        // sending context is discarded, so it is part of the contract.
+        assert_eq!(
+            field_of(&interpreter, RECEIVER_OOP, 0),
+            OOP::from_raw(NIL_POINTER)
+        );
+        assert_eq!(
+            field_of(&interpreter, RECEIVER_OOP, 1),
+            OOP::from_raw(NIL_POINTER)
+        );
+        // One past the count is untouched.
+        assert_eq!(
+            field_of(&interpreter, RECEIVER_OOP, 2).integer_value_of(),
+            Ok(12)
+        );
+    }
+
+    #[test]
+    fn hash_is_the_pointer_without_its_low_bit() {
+        // Every pointer that is not a SmallInteger is even, so the low bit
+        // carries no information and dropping it spreads the hash.
+        assert_eq!(Interpreter::hash(OOP::from_raw(0)), 0);
+        assert_eq!(Interpreter::hash(OOP::from_raw(2)), 1);
+        assert_eq!(Interpreter::hash(OOP::from_raw(82)), 41);
+        assert_eq!(Interpreter::hash(OOP::from_raw(0xFFFE)), 0x7FFF);
+    }
+
+    #[test]
+    fn superclass_of_walks_the_chain_to_nil() {
+        let interpreter = Fixture::new().build();
+
+        assert_eq!(
+            interpreter.superclass_of(OOP::from_raw(SUBCLASS_OOP)),
+            OOP::from_raw(SUPERCLASS_OOP)
+        );
+        assert_eq!(
+            interpreter.superclass_of(OOP::from_raw(SUPERCLASS_OOP)),
+            OOP::from_raw(NIL_POINTER)
+        );
+    }
+
+    #[test]
+    fn dictionary_lookup_finds_a_selector_and_sets_the_registers() {
+        let mut fixture = Fixture::new();
+        in_subclass(&mut fixture, SELECTOR_ONE_OOP, METHOD_X_OOP);
+        let mut interpreter = fixture.build();
+        interpreter.message_selector = OOP::from_raw(SELECTOR_ONE_OOP);
+
+        assert!(interpreter.lookup_method_in_dictionary(OOP::from_raw(SUBCLASS_DICTIONARY_OOP)));
+
+        // The bool only reports success; the method itself comes back in the
+        // registers, which is what sendSelectorToClass reads afterwards.
+        assert_eq!(interpreter.new_method, OOP::from_raw(METHOD_X_OOP));
+        assert_eq!(interpreter.primitive_index, 0, "method X has no primitive");
+    }
+
+    #[test]
+    fn dictionary_lookup_picks_up_the_primitive_index() {
+        // Method Y has flag value 7 and a header extension naming primitive 70.
+        let mut fixture = Fixture::new();
+        in_subclass(&mut fixture, SELECTOR_TWO_OOP, METHOD_Y_OOP);
+        let mut interpreter = fixture.build();
+        interpreter.message_selector = OOP::from_raw(SELECTOR_TWO_OOP);
+
+        assert!(interpreter.lookup_method_in_dictionary(OOP::from_raw(SUBCLASS_DICTIONARY_OOP)));
+
+        assert_eq!(interpreter.new_method, OOP::from_raw(METHOD_Y_OOP));
+        assert_eq!(interpreter.primitive_index, 70);
+    }
+
+    #[test]
+    fn dictionary_lookup_probes_past_a_collision() {
+        // 82 and 98 hash to the same slot, so the second one installed sits one
+        // place further on and is only reachable by walking forward.
+        let mut fixture = Fixture::new();
+        in_subclass(&mut fixture, SELECTOR_ONE_OOP, METHOD_X_OOP);
+        in_subclass(&mut fixture, SELECTOR_COLLIDES_WITH_ONE_OOP, METHOD_Y_OOP);
+        let mut interpreter = fixture.build();
+
+        interpreter.message_selector = OOP::from_raw(SELECTOR_ONE_OOP);
+        assert!(interpreter.lookup_method_in_dictionary(OOP::from_raw(SUBCLASS_DICTIONARY_OOP)));
+        assert_eq!(interpreter.new_method, OOP::from_raw(METHOD_X_OOP));
+
+        interpreter.message_selector = OOP::from_raw(SELECTOR_COLLIDES_WITH_ONE_OOP);
+        assert!(interpreter.lookup_method_in_dictionary(OOP::from_raw(SUBCLASS_DICTIONARY_OOP)));
+        assert_eq!(
+            interpreter.new_method,
+            OOP::from_raw(METHOD_Y_OOP),
+            "the colliding selector must resolve to its own method"
+        );
+    }
+
+    #[test]
+    fn dictionary_lookup_stops_at_a_nil() {
+        let mut fixture = Fixture::new();
+        in_subclass(&mut fixture, SELECTOR_ONE_OOP, METHOD_X_OOP);
+        let mut interpreter = fixture.build();
+        interpreter.message_selector = OOP::from_raw(SELECTOR_ABSENT_OOP);
+
+        assert!(!interpreter.lookup_method_in_dictionary(OOP::from_raw(SUBCLASS_DICTIONARY_OOP)));
+    }
+
+    #[test]
+    fn dictionary_lookup_terminates_on_a_full_dictionary() {
+        // With no nil anywhere, the only way out is wrapping around twice.
+        // Getting this wrong hangs rather than fails.
+        let mut fixture = Fixture::new();
+        fixture.fill_dictionary(SUBCLASS_DICTIONARY_LOCATION);
+        let mut interpreter = fixture.build();
+        interpreter.message_selector = OOP::from_raw(SELECTOR_ABSENT_OOP);
+
+        assert!(!interpreter.lookup_method_in_dictionary(OOP::from_raw(SUBCLASS_DICTIONARY_OOP)));
+    }
+
+    #[test]
+    fn class_lookup_finds_a_method_in_the_class_itself() {
+        let mut fixture = Fixture::new();
+        in_subclass(&mut fixture, SELECTOR_ONE_OOP, METHOD_X_OOP);
+        in_superclass(&mut fixture, SELECTOR_ONE_OOP, METHOD_Y_OOP);
+        let mut interpreter = fixture.build();
+        interpreter.message_selector = OOP::from_raw(SELECTOR_ONE_OOP);
+
+        assert!(interpreter.lookup_method_in_class(OOP::from_raw(SUBCLASS_OOP)));
+
+        assert_eq!(
+            interpreter.new_method,
+            OOP::from_raw(METHOD_X_OOP),
+            "the subclass's own method wins over the inherited one"
+        );
+    }
+
+    #[test]
+    fn class_lookup_walks_up_to_the_superclass() {
+        let mut fixture = Fixture::new();
+        in_superclass(&mut fixture, SELECTOR_ONE_OOP, METHOD_Y_OOP);
+        let mut interpreter = fixture.build();
+        interpreter.message_selector = OOP::from_raw(SELECTOR_ONE_OOP);
+
+        assert!(interpreter.lookup_method_in_class(OOP::from_raw(SUBCLASS_OOP)));
+
+        assert_eq!(interpreter.new_method, OOP::from_raw(METHOD_Y_OOP));
+    }
+
+    #[test]
+    fn class_lookup_falls_back_to_does_not_understand() {
+        // Nothing implements the selector, but the superclass implements
+        // doesNotUnderstand:, so the lookup restarts from the original class and
+        // finds it. The original message is repackaged on the way.
+        let mut fixture = Fixture::new();
+        in_superclass(&mut fixture, DOES_NOT_UNDERSTAND_SELECTOR, METHOD_DNU_OOP);
+        let mut interpreter = fixture.build();
+
+        interpreter.push(OOP::from_raw(RECEIVER_OOP));
+        interpreter.push(small_int_oop(7));
+        interpreter.push(small_int_oop(8));
+        interpreter.message_selector = OOP::from_raw(SELECTOR_ABSENT_OOP);
+        interpreter.argument_count = 2;
+
+        assert!(interpreter.lookup_method_in_class(OOP::from_raw(SUBCLASS_OOP)));
+
+        assert_eq!(interpreter.new_method, OOP::from_raw(METHOD_DNU_OOP));
+        assert_eq!(
+            interpreter.message_selector,
+            OOP::from_raw(DOES_NOT_UNDERSTAND_SELECTOR)
+        );
+        assert_eq!(
+            interpreter.argument_count, 1,
+            "the Message is the one and only argument now"
+        );
+
+        // The two arguments came off the stack and a Message took their place,
+        // leaving the receiver below it.
+        assert_eq!(interpreter.sp, EMPTY_STACK_SP + 2);
+        let message = interpreter.stack_top();
+        assert_eq!(
+            interpreter.stack_value(1),
+            OOP::from_raw(RECEIVER_OOP),
+            "the receiver stays put below the Message"
+        );
+
+        assert_eq!(
+            field_of(&interpreter, message.value, MESSAGE_SELECTOR_INDEX),
+            OOP::from_raw(SELECTOR_ABSENT_OOP),
+            "the Message remembers the selector that was not understood"
+        );
+        let arguments = field_of(&interpreter, message.value, MESSAGE_ARGUMENTS_INDEX);
+        assert_eq!(
+            field_of(&interpreter, arguments.value, 0).integer_value_of(),
+            Ok(7)
+        );
+        assert_eq!(
+            field_of(&interpreter, arguments.value, 1).integer_value_of(),
+            Ok(8)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Recursive not understood error encountered")]
+    fn class_lookup_rejects_an_image_without_does_not_understand() {
+        // No class in the chain implements doesNotUnderstand:, so the fallback
+        // has nowhere to go and the image is unusable.
+        let mut interpreter = Fixture::new().build();
+        interpreter.push(OOP::from_raw(RECEIVER_OOP));
+        interpreter.message_selector = OOP::from_raw(SELECTOR_ABSENT_OOP);
+        interpreter.argument_count = 0;
+
+        interpreter.lookup_method_in_class(OOP::from_raw(SUBCLASS_OOP));
     }
 }
