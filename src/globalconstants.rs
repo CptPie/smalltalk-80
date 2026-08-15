@@ -119,6 +119,7 @@ pub const HOME_INDEX: u16 = 5;
 // shared again
 pub const TEMP_FRAME_START: u16 = 6;
 
+pub const HEADER_INDEX: u16 = 0;
 pub const LITERAL_START: u16 = 1;
 
 // Association

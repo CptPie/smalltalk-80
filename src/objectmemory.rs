@@ -1168,8 +1168,8 @@ impl ObjectMemory {
     /// Fetch a specific field of an object.
     ///
     /// # Parameters:
-    ///     * pointer (u16): The pointer to the object
     ///     * field_index (u16): The 0 indexed field that shall be fetched
+    ///     * pointer (OOP): The pointer to the object
     ///
     /// # Returns:
     ///     * u16, the raw field data

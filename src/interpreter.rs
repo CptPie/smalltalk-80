@@ -1,8 +1,9 @@
 use crate::{
     globalconstants::{
-        FALSE_POINTER, HOME_INDEX, INSTRUCTION_POINTER_INDEX, LITERAL_START, METHOD_INDEX,
-        MINUS_ONE_POINTER, NIL_POINTER, ONE_POINTER, RECEIVER_INDEX, STACK_POINTER_INDEX,
-        TEMP_FRAME_START, TRUE_POINTER, TWO_POINTER, VALUE_INDEX, ZERO_POINTER,
+        FALSE_POINTER, HEADER_INDEX, HOME_INDEX, INSTRUCTION_POINTER_INDEX, LITERAL_START,
+        METHOD_INDEX, MINUS_ONE_POINTER, NIL_POINTER, ONE_POINTER, RECEIVER_INDEX,
+        STACK_POINTER_INDEX, TEMP_FRAME_START, TRUE_POINTER, TWO_POINTER, VALUE_INDEX,
+        ZERO_POINTER,
     },
     objectmemory::ObjectMemory,
     oop::OOP,
@@ -514,6 +515,277 @@ impl Interpreter {
             self.memory
                 .fetch_pointer(offset + LITERAL_START, method_pointer),
         )
+    }
+
+    /// Returns a CompiledMethod's header, the SmallInteger in its first field
+    /// that encodes the method's temporary count, literal count, context size
+    /// and flag value.
+    ///
+    /// # Parameters:
+    ///     * method_pointer (OOP): The CompiledMethod to read the header of
+    ///
+    /// # Returns:
+    ///     * OOP, the header, always a SmallInteger
+    //
+    // see Bluebook p. 577
+    //
+    // headerOf: methodPointer
+    //   ↑memory fetchPointer: HeaderIndex ofObject: methodPointer
+    fn header_of(&self, method_pointer: OOP) -> OOP {
+        OOP::from_raw(self.memory.fetch_pointer(HEADER_INDEX, method_pointer))
+    }
+
+    /// Returns how many temporary variables a CompiledMethod uses, arguments
+    /// included.
+    ///
+    /// # Parameters:
+    ///     * method_pointer (OOP): The CompiledMethod to inspect
+    ///
+    /// # Returns:
+    ///     * u16, the temporary count
+    //
+    // see Bluebook p. 577
+    //
+    // temporaryCountOf: methodPointer
+    //   ↑self extractBits: 3 to: 7 of: (self headerOf: methodPointer)
+    fn temporary_count_of(&self, method_pointer: OOP) -> u16 {
+        Self::extract_bits(3, 7, self.header_of(method_pointer).value)
+    }
+
+    /// Returns whether a CompiledMethod needs the larger of the two MethodContext
+    /// sizes: the small one holds 12 words of temporaries and stack, the large
+    /// one 32.
+    ///
+    /// # Parameters:
+    ///     * method_pointer (OOP): The CompiledMethod to inspect
+    ///
+    /// # Returns:
+    ///     * bool, true if a large MethodContext is required
+    //
+    // see Bluebook p. 578
+    //
+    // largeContextFlagOf: methodPointer
+    //   ↑self extractBits: 8 to: 8 of: (self headerOf: methodPointer)
+    fn large_context_flag_of(&self, method_pointer: OOP) -> bool {
+        Self::extract_bits(8, 8, self.header_of(method_pointer).value) == 1
+    }
+
+    /// Returns the size of a CompiledMethod's literal frame, which also fixes
+    /// where its bytecodes start.
+    ///
+    /// # Parameters:
+    ///     * method_pointer (OOP): The CompiledMethod to inspect
+    ///
+    /// # Returns:
+    ///     * u16, the number of literals
+    //
+    // see Bluebook p. 578
+    //
+    // literalCountOf: methodPointer
+    //   ↑self literalCountOfHeader: (self headerOf: methodPointer)
+    fn literal_count_of(&self, method_pointer: OOP) -> u16 {
+        Self::literal_count_of_header(self.header_of(method_pointer))
+    }
+
+    /// Extracts the literal count from a header that has already been fetched.
+    /// Split out because the send machinery reads the literal count of methods
+    /// it has only the header of.
+    ///
+    /// # Parameters:
+    ///     * header_pointer (OOP): The method header
+    ///
+    /// # Returns:
+    ///     * u16, the number of literals
+    //
+    // see Bluebook p. 578
+    //
+    // literalCountOfHeader: headerPointer
+    //   ↑self extractBits: 9 to: 14 of: headerPointer
+    fn literal_count_of_header(header_pointer: OOP) -> u16 {
+        Self::extract_bits(9, 14, header_pointer.value)
+    }
+
+    /// Returns the total number of object pointers in a CompiledMethod: the
+    /// header plus the literal frame, but not the bytecodes.
+    ///
+    /// # Parameters:
+    ///     * method_pointer (OOP): The CompiledMethod to inspect
+    ///
+    /// # Returns:
+    ///     * u16, the object pointer count
+    //
+    // see Bluebook p. 578
+    //
+    // objectPointerCountOf: methodPointer
+    //   ↑(self literalCountOf: methodPointer) + LiteralStart
+    fn object_pointer_count_of(&self, method_pointer: OOP) -> u16 {
+        self.literal_count_of(method_pointer) + LITERAL_START
+    }
+
+    /// Returns the byte index of a CompiledMethod's first bytecode.
+    ///
+    /// The result is 1-relative, matching the way a context stores its
+    /// instruction pointer, so it can be written into a new context as-is.
+    ///
+    /// # Parameters:
+    ///     * method_pointer (OOP): The CompiledMethod to inspect
+    ///
+    /// # Returns:
+    ///     * u16, the 1-relative byte index of the first bytecode
+    //
+    // see Bluebook p. 578
+    //
+    // initialInstructionPointerOfMethod: methodPointer
+    //   ↑((self literalCountOf: methodPointer) + LiteralStart) * 2 + 1
+    fn initial_instruction_pointer_of_method(&self, method_pointer: OOP) -> u16 {
+        (self.literal_count_of(method_pointer) + LITERAL_START) * 2 + 1
+    }
+
+    /// Returns a CompiledMethod's flag value, which encodes its argument count
+    /// and whether it has an associated primitive.
+    ///
+    /// 0 through 4 mean no primitive and that many arguments, 5 means a quick
+    /// return of self, 6 a quick return of an instance variable, and 7 means the
+    /// argument count and primitive index live in a header extension.
+    ///
+    /// # Parameters:
+    ///     * method_pointer (OOP): The CompiledMethod to inspect
+    ///
+    /// # Returns:
+    ///     * u16, the flag value, 0 through 7
+    //
+    // see Bluebook p. 578
+    //
+    // flagValueOf: methodPointer
+    //   ↑self extractBits: 0 to: 2 of: (self headerOf: methodPointer)
+    fn flag_value_of(&self, method_pointer: OOP) -> u16 {
+        Self::extract_bits(0, 2, self.header_of(method_pointer).value)
+    }
+
+    /// Returns which instance variable a flag value 6 method returns.
+    ///
+    /// Shares the header bits that ordinarily hold the temporary count, since a
+    /// method that only returns an instance variable has no temporaries.
+    ///
+    /// # Parameters:
+    ///     * method_pointer (OOP): The CompiledMethod to inspect
+    ///
+    /// # Returns:
+    ///     * u16, the index of the instance variable to return
+    //
+    // see Bluebook p. 579
+    //
+    // fieldIndexOf: methodPointer
+    //   ↑self extractBits: 3 to: 7 of: (self headerOf: methodPointer)
+    fn field_index_of(&self, method_pointer: OOP) -> u16 {
+        Self::extract_bits(3, 7, self.header_of(method_pointer).value)
+    }
+
+    /// Returns a CompiledMethod's header extension, the next to last literal of a
+    /// method whose flag value is 7.
+    ///
+    /// # Parameters:
+    ///     * method_pointer (OOP): The CompiledMethod to inspect
+    ///
+    /// # Returns:
+    ///     * OOP, the header extension, a SmallInteger
+    //
+    // see Bluebook p. 580
+    //
+    // headerExtensionOf: methodPointer
+    //   | literalCount |
+    //   literalCount ← self literalCountOf: methodPointer.
+    //   ↑self literal: literalCount-2 ofMethod: methodPointer
+    fn header_extension_of(&self, method_pointer: OOP) -> OOP {
+        let literal_count = self.literal_count_of(method_pointer);
+        let offset = literal_count.checked_sub(2).unwrap_or_else(|| {
+            self.vm_panic("header extension in a method with fewer than two literals")
+        });
+        self.literal_of_method(offset, method_pointer)
+    }
+
+    /// Returns how many arguments a CompiledMethod takes.
+    ///
+    /// Flag values below 5 are the argument count directly, 5 and 6 are the quick
+    /// returns and take none, and 7 reads the count out of the header extension.
+    ///
+    /// # Parameters:
+    ///     * method_pointer (OOP): The CompiledMethod to inspect
+    ///
+    /// # Returns:
+    ///     * u16, the argument count
+    //
+    // see Bluebook p. 580
+    //
+    // argumentCountOf: methodPointer
+    //   | flagValue |
+    //   flagValue ← self flagValueOf: methodPointer.
+    //   flagValue<5 ifTrue: [↑flagValue].
+    //   flagValue<7 ifTrue: [↑0].
+    //   ↑self extractBits: 2 to: 6 of: (self headerExtensionOf: methodPointer)
+    fn argument_count_of(&self, method_pointer: OOP) -> u16 {
+        let flag_value = self.flag_value_of(method_pointer);
+        if flag_value < 5 {
+            return flag_value;
+        } else if flag_value < 7 {
+            return 0;
+        }
+        Self::extract_bits(2, 6, self.header_extension_of(method_pointer).value)
+    }
+
+    /// Returns the index of the primitive routine associated with a
+    /// CompiledMethod, or 0 if it has none.
+    ///
+    /// # Parameters:
+    ///     * method_pointer (OOP): The CompiledMethod to inspect
+    ///
+    /// # Returns:
+    ///     * u16, the primitive index, 0 when there is no primitive
+    //
+    // see Bluebook p. 580
+    //
+    // primitiveIndexOf: methodPointer
+    //   | flagValue |
+    //   flagValue ← self flagValueOf: methodPointer.
+    //   flagValue=7
+    //     ifTrue: [↑self extractBits: 7 to: 14
+    //                of: (self headerExtensionOf: methodPointer)]
+    //     ifFalse: [↑0]
+    fn primitive_index_of(&self, method_pointer: OOP) -> u16 {
+        let flag_value = self.flag_value_of(method_pointer);
+        if flag_value == 7 {
+            return Self::extract_bits(7, 14, self.header_extension_of(method_pointer).value);
+        } else {
+            return 0;
+        }
+    }
+
+    /// Returns the class in whose message dictionary a CompiledMethod was found.
+    ///
+    /// Stored as the last literal, an Association, in every method that sends to
+    /// super or carries a header extension. Super sends start their lookup in this
+    /// class's superclass, which is not necessarily the receiver's superclass.
+    ///
+    /// # Parameters:
+    ///     * method_pointer (OOP): The CompiledMethod to inspect
+    ///
+    /// # Returns:
+    ///     * OOP, the method class
+    //
+    // see Bluebook p. 580
+    //
+    // methodClassOf: methodPointer
+    //   | literalCount association |
+    //   literalCount ← self literalCountOf: methodPointer.
+    //   association ← self literal: literalCount-1 ofMethod: methodPointer.
+    //   ↑memory fetchPointer: ValueIndex ofObject: association
+    fn method_class_of(&self, method_pointer: OOP) -> OOP {
+        let literal_count = self.literal_count_of(method_pointer);
+        let offset = literal_count
+            .checked_sub(1)
+            .unwrap_or_else(|| self.vm_panic("method class read from a method with no literals"));
+        let association = self.literal_of_method(offset, method_pointer);
+        OOP::from_raw(self.memory.fetch_pointer(VALUE_INDEX, association))
     }
 
     /// Extracts the receiver-variable field index from the current bytecode and
@@ -1242,6 +1514,13 @@ mod tests {
 
         fn literal(&mut self, index: u16, value: u16) -> &mut Self {
             self.seg[(METHOD_LOCATION + HEADER_SIZE + LITERAL_START + index) as usize] = value;
+            self
+        }
+
+        /// Overwrites the method header. The default agrees with the fixture's own
+        /// layout, so only the header decoding tests need to set it.
+        fn header(&mut self, header: u16) -> &mut Self {
+            self.seg[(METHOD_LOCATION + HEADER_SIZE + HEADER_INDEX) as usize] = header;
             self
         }
 
@@ -1979,5 +2258,211 @@ mod tests {
 
         interpreter.cycle();
         interpreter.cycle();
+    }
+
+    // ┌─────────────────────┐
+    // │    METHOD HEADERS   │
+    // └─────────────────────┘
+
+    /// Packs a method header the way the compiler does. Bluebook Figure 27.2:
+    /// flag value, temporary count, large context flag, literal count, and the
+    /// SmallInteger tag in the low bit.
+    fn method_header(
+        flag_value: u16,
+        temporary_count: u16,
+        large_context: bool,
+        literal_count: u16,
+    ) -> u16 {
+        (flag_value << 13)
+            | (temporary_count << 8)
+            | ((large_context as u16) << 7)
+            | (literal_count << 1)
+            | 1
+    }
+
+    /// Packs a header extension. Bluebook Figure 27.4: argument count, primitive
+    /// index, and the SmallInteger tag. The two high bits are always zero.
+    fn header_extension(argument_count: u16, primitive_index: u16) -> u16 {
+        (argument_count << 9) | (primitive_index << 1) | 1
+    }
+
+    /// The fixture's own method, as an OOP.
+    fn method() -> OOP {
+        OOP::from_raw(METHOD_OOP)
+    }
+
+    #[test]
+    fn method_header_fields_decode_without_bleeding_into_each_other() {
+        // The all-zero and saturated cases pin the field widths; the cases that
+        // set exactly one field pin the offsets, since a wrong shift would show
+        // the value up in a neighbouring accessor.
+        for (flag, temporaries, large, literals) in [
+            (0u16, 0u16, false, 0u16),
+            (7, 31, true, 63), // every field saturated
+            (7, 0, false, 0),
+            (0, 31, false, 0),
+            (0, 0, true, 0),
+            (0, 0, false, 63),
+            (3, 17, true, 40),
+        ] {
+            let header = method_header(flag, temporaries, large, literals);
+            let interpreter = Fixture::new().header(header).build();
+
+            let label = format!("header {header:#06x}");
+            assert_eq!(
+                interpreter.flag_value_of(method()),
+                flag,
+                "flag value, {label}"
+            );
+            assert_eq!(
+                interpreter.temporary_count_of(method()),
+                temporaries,
+                "temporary count, {label}"
+            );
+            assert_eq!(
+                interpreter.large_context_flag_of(method()),
+                large,
+                "large context flag, {label}"
+            );
+            assert_eq!(
+                interpreter.literal_count_of(method()),
+                literals,
+                "literal count, {label}"
+            );
+            // literal_count_of delegates to this, but it is also called directly
+            // by the send machinery on a header it already holds.
+            assert_eq!(
+                Interpreter::literal_count_of_header(OOP::from_raw(header)),
+                literals,
+                "literal count of header, {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn field_index_reads_the_same_bits_as_the_temporary_count() {
+        // A flag value 6 method returns an instance variable and has no
+        // temporaries, so the two share a field. This is deliberate in the book,
+        // not a transcription slip.
+        let interpreter = Fixture::new().header(method_header(6, 9, false, 0)).build();
+
+        assert_eq!(interpreter.field_index_of(method()), 9);
+        assert_eq!(interpreter.temporary_count_of(method()), 9);
+    }
+
+    #[test]
+    fn initial_instruction_pointer_agrees_with_where_the_bytecodes_are() {
+        // The fixture writes the context's stored ip from its own layout and the
+        // header's literal count separately, so this checks the two descriptions
+        // of "where the bytecodes start" against each other.
+        let interpreter = Fixture::new().build();
+
+        assert_eq!(
+            interpreter.initial_instruction_pointer_of_method(method()) as usize,
+            FIRST_BYTECODE_BYTE as usize + 1,
+            "the result is 1-relative, ready to store into a context"
+        );
+        assert_eq!(
+            interpreter.ip, FIRST_BYTECODE_BYTE as usize,
+            "and the interpreter's own ip, loaded from the context, is one less"
+        );
+        assert_eq!(
+            interpreter.object_pointer_count_of(method()),
+            LITERAL_COUNT + LITERAL_START,
+            "header plus literal frame"
+        );
+    }
+
+    #[test]
+    fn argument_count_follows_the_flag_value() {
+        // 0 through 4 are the count itself.
+        for flag in 0u16..=4 {
+            let interpreter = Fixture::new()
+                .header(method_header(flag, 0, false, 0))
+                .build();
+            assert_eq!(
+                interpreter.argument_count_of(method()),
+                flag,
+                "flag value {flag}"
+            );
+        }
+        // 5 and 6 are the quick returns and take no arguments.
+        for flag in 5u16..=6 {
+            let interpreter = Fixture::new()
+                .header(method_header(flag, 0, false, 0))
+                .build();
+            assert_eq!(
+                interpreter.argument_count_of(method()),
+                0,
+                "flag value {flag}"
+            );
+        }
+    }
+
+    #[test]
+    fn primitive_index_is_zero_unless_the_flag_value_is_seven() {
+        for flag in 0u16..=6 {
+            let interpreter = Fixture::new()
+                .header(method_header(flag, 0, false, 0))
+                .build();
+            assert_eq!(
+                interpreter.primitive_index_of(method()),
+                0,
+                "flag value {flag}"
+            );
+        }
+    }
+
+    #[test]
+    fn flag_value_seven_takes_its_counts_from_the_header_extension() {
+        // Two literals: the extension at literalCount-2, the method class
+        // Association at literalCount-1.
+        let interpreter = Fixture::new()
+            .header(method_header(7, 0, false, 2))
+            .literal(0, header_extension(3, 105))
+            .build();
+
+        assert_eq!(interpreter.argument_count_of(method()), 3);
+        assert_eq!(interpreter.primitive_index_of(method()), 105);
+    }
+
+    #[test]
+    fn header_extension_and_method_class_read_adjacent_literals() {
+        // Three literals: the extension is literal 1 and the method class
+        // Association is literal 2. The two offsets differ only by one, and
+        // swapping them stays silent until a super send or a primitive misfires.
+        let interpreter = Fixture::new()
+            .header(method_header(7, 0, false, 3))
+            .literal(1, header_extension(2, 60))
+            .literal(2, ASSOCIATION_OOP)
+            .association_value(small_int(1234))
+            .build();
+
+        assert_eq!(
+            interpreter.header_extension_of(method()).value,
+            header_extension(2, 60)
+        );
+        // methodClassOf follows the Association to its value, as a super send
+        // would before walking to the superclass.
+        assert_eq!(
+            interpreter.method_class_of(method()).integer_value_of(),
+            Ok(1234)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "header extension in a method with fewer than two literals")]
+    fn header_extension_of_rejects_a_method_with_too_few_literals() {
+        let interpreter = Fixture::new().header(method_header(7, 0, false, 1)).build();
+
+        interpreter.header_extension_of(method());
+    }
+
+    #[test]
+    #[should_panic(expected = "method class read from a method with no literals")]
+    fn method_class_of_rejects_a_method_with_no_literals() {
+        let interpreter = Fixture::new().header(method_header(0, 0, false, 0)).build();
+
+        interpreter.method_class_of(method());
     }
 }
