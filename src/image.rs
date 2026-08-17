@@ -133,13 +133,11 @@ impl Image {
         let heap_end = IMAGE_HEADER_BYTES + heap_words * 2;
 
         for chunk in image.data[IMAGE_HEADER_BYTES..heap_end].chunks_exact(2) {
-            let heap_word: u16;
-
-            if image.big_endian {
-                heap_word = u16::from_be_bytes([chunk[0], chunk[1]]);
+            let heap_word = if image.big_endian {
+                u16::from_be_bytes([chunk[0], chunk[1]])
             } else {
-                heap_word = u16::from_le_bytes([chunk[0], chunk[1]]);
-            }
+                u16::from_le_bytes([chunk[0], chunk[1]])
+            };
 
             heap_segment.push(heap_word);
             if heap_segment.len() == HEAP_SEGMENT_SIZE {
@@ -160,13 +158,11 @@ impl Image {
             Vec::with_capacity(image.header.object_table_length as usize);
 
         for entry_bytes in image.data[index..ot_end].chunks_exact(2) {
-            let word: u16;
-
-            if image.big_endian {
-                word = u16::from_be_bytes([entry_bytes[0], entry_bytes[1]])
+            let word = if image.big_endian {
+                u16::from_be_bytes([entry_bytes[0], entry_bytes[1]])
             } else {
-                word = u16::from_le_bytes([entry_bytes[0], entry_bytes[1]])
-            }
+                u16::from_le_bytes([entry_bytes[0], entry_bytes[1]])
+            };
 
             object_table.push(word);
         }
@@ -192,7 +188,7 @@ impl Image {
                 )));
             }
         }
-        return Ok(mem);
+        Ok(mem)
     }
 
     /// Returns a reference to the decoded image header.
@@ -251,7 +247,7 @@ impl Image {
         // words in the object table
         let ot_words = mem.object_table_len();
         // where in the image does the heap end?
-        let heap_end = IMAGE_HEADER_BYTES + heap_words as usize * 2;
+        let heap_end = IMAGE_HEADER_BYTES + heap_words * 2;
         // Where does the object table start? This value holds the index of the last byte of the
         // 'last' page that the heap occupies
         let ot_offset = heap_end.div_ceil(IMAGE_PAGE_SIZE_BYTES) * IMAGE_PAGE_SIZE_BYTES;
@@ -313,7 +309,7 @@ impl Image {
             push_u16(&mut out, word, self.big_endian);
         }
 
-        return out;
+        out
     }
 
     /// Dumps an ObjectMemory and writes the resulting bytes to disk.

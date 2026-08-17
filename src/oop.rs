@@ -2,6 +2,9 @@
 
 use crate::errors::ObjectMemoryError;
 
+// OOP is the Bluebook's name for an object oriented pointer and is used as such
+// throughout the specification, so it keeps its spelling.
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OOP {
     pub value: u16,
@@ -30,7 +33,7 @@ impl OOP {
     //    ↑(objectPointer bitAnd: 1) = 1
     //
     pub fn is_integer_object(&self) -> bool {
-        return (self.value & 0x1) == 1;
+        (self.value & 0x1) == 1
     }
 
     /// Validates an OOP to be an object, not a SmallInteger.
@@ -49,9 +52,9 @@ impl OOP {
     //
     fn cant_be_integer_object(&self) -> Result<u16, ObjectMemoryError> {
         if self.is_integer_object() {
-            return Err(ObjectMemoryError::InvalidSmallIntegerAccess);
+            Err(ObjectMemoryError::InvalidSmallIntegerAccess)
         } else {
-            return Ok(self.value);
+            Ok(self.value)
         }
     }
 
@@ -68,9 +71,9 @@ impl OOP {
     //
     pub fn integer_value_of(&self) -> Result<i16, ObjectMemoryError> {
         if self.is_integer_object() {
-            return Ok((self.value as i16) >> 1);
+            Ok((self.value as i16) >> 1)
         } else {
-            return Err(ObjectMemoryError::NotInteger);
+            Err(ObjectMemoryError::NotInteger)
         }
     }
 
@@ -88,7 +91,7 @@ impl OOP {
     //    ↑valueWord <= -16384 and: [valueWord > 16834]
     //
     pub fn is_integer_value(value: i16) -> bool {
-        return value >= -16384 && value < 16384;
+        (-16384..16384).contains(&value)
     }
 
     /// Converts an integer value to an OOP object.
@@ -107,11 +110,11 @@ impl OOP {
     //
     pub fn integer_object_of(value: i16) -> Result<OOP, ObjectMemoryError> {
         if Self::is_integer_value(value) {
-            return Ok(OOP {
+            Ok(OOP {
                 value: ((value << 1) | 1) as u16,
-            });
+            })
         } else {
-            return Err(ObjectMemoryError::NotInIntegerRange);
+            Err(ObjectMemoryError::NotInIntegerRange)
         }
     }
 }

@@ -101,8 +101,8 @@ impl ObjectMemory {
             object_table,
             free_pointer_list: NON_POINTER,
             current_segment: 0,
-            last_segment: last_segment,
-            limit_in_last_page: limit_in_last_page,
+            last_segment,
+            limit_in_last_page,
         }
     }
 
@@ -232,7 +232,7 @@ impl ObjectMemory {
     //
     fn count_bits_of(&self, oop: OOP) -> u8 {
         let word0 = self.object_table[oop.value as usize];
-        return (word0 >> 8) as u8;
+        (word0 >> 8) as u8
     }
 
     /// Returns the odd-length bit, indicating if a nonpointer object has an odd byte count.
@@ -250,7 +250,7 @@ impl ObjectMemory {
     //
     fn odd_bit_of(&self, oop: OOP) -> bool {
         let word0 = self.object_table[oop.value as usize];
-        return (word0 >> 7) & 1 == 1;
+        (word0 >> 7) & 1 == 1
     }
 
     /// Returns the pointer-fields bit. True if the object's data fields contain object pointers.
@@ -268,7 +268,7 @@ impl ObjectMemory {
     //
     fn pointer_bit_of(&self, oop: OOP) -> bool {
         let word0 = self.object_table[oop.value as usize];
-        return (word0 >> 6) & 1 == 1;
+        (word0 >> 6) & 1 == 1
     }
 
     /// Returns the free-entry bit. True if this object table entry is unused.
@@ -286,7 +286,7 @@ impl ObjectMemory {
     //
     fn free_bit_of(&self, oop: OOP) -> bool {
         let word0 = self.object_table[oop.value as usize];
-        return (word0 >> 5) & 1 == 1;
+        (word0 >> 5) & 1 == 1
     }
 
     /// Returns the 4-bit heap segment index from the object table entry.
@@ -304,7 +304,7 @@ impl ObjectMemory {
     //
     fn segment_bits_of(&self, oop: OOP) -> u8 {
         let word0 = self.object_table[oop.value as usize];
-        return (word0 & 0xF) as u8;
+        (word0 & 0xF) as u8
     }
 
     /// Returns the 16-bit heap location (word address) from the object table entry.
@@ -321,7 +321,7 @@ impl ObjectMemory {
     //    ↑self ot: objectPointer + 1
     //
     fn location_bits_of(&self, oop: OOP) -> u16 {
-        return self.object_table[(oop.value + 1) as usize];
+        self.object_table[(oop.value + 1) as usize]
     }
 
     // ┌─────────────────────┐
@@ -358,9 +358,9 @@ impl ObjectMemory {
     //
     fn odd_bit_of_put(&mut self, oop: OOP, new_bit: bool) {
         let mut word0 = self.object_table[oop.value as usize];
-        word0 = word0 & 0xFF7F;
+        word0 &= 0xFF7F;
         if new_bit {
-            word0 = word0 | 0x0080;
+            word0 |= 0x0080;
         }
         self.object_table[oop.value as usize] = word0
     }
@@ -378,9 +378,9 @@ impl ObjectMemory {
     //
     fn pointer_bit_of_put(&mut self, oop: OOP, new_bit: bool) {
         let mut word0 = self.object_table[oop.value as usize];
-        word0 = word0 & 0xFFBF;
+        word0 &= 0xFFBF;
         if new_bit {
-            word0 = word0 | 0x0040;
+            word0 |= 0x0040;
         }
         self.object_table[oop.value as usize] = word0
     }
@@ -398,9 +398,9 @@ impl ObjectMemory {
     //
     fn free_bit_of_put(&mut self, oop: OOP, new_bit: bool) {
         let mut word0 = self.object_table[oop.value as usize];
-        word0 = word0 & 0xFFDF;
+        word0 &= 0xFFDF;
         if new_bit {
-            word0 = word0 | 0x0020;
+            word0 |= 0x0020;
         }
         self.object_table[oop.value as usize] = word0
     }
@@ -449,6 +449,9 @@ impl ObjectMemory {
     //      put: (self headOfFreePointerList).
     //    self headOfFreePointerListPut: objectPointer
     //
+    // The 'to' here is the Bluebook selector's preposition, not a conversion
+    // prefix, so clippy's naming convention does not apply.
+    #[allow(clippy::wrong_self_convention)]
     fn to_free_pointer_list_add(&mut self, oop: OOP) {
         self.free_bit_of_put(oop, true);
         self.location_bits_of_put(oop, self.free_pointer_list);
@@ -478,7 +481,7 @@ impl ObjectMemory {
         let oop = OOP::from_raw(head);
         self.free_pointer_list = self.location_bits_of(oop);
         self.free_bit_of_put(oop, false);
-        return Ok(oop);
+        Ok(oop)
     }
 }
 
@@ -489,14 +492,14 @@ mod ot_accessor_tests {
     use super::*;
 
     fn dummy_memory() -> ObjectMemory {
-        return ObjectMemory {
+        ObjectMemory {
             heap: Heap::new(),
             object_table: vec![0u16; 64],
             free_pointer_list: NON_POINTER,
             current_segment: 0,
             last_segment: 0,
             limit_in_last_page: 0,
-        };
+        }
     }
 
     #[test]
@@ -643,14 +646,14 @@ mod ot_free_list_tests {
     use super::*;
 
     fn dummy_memory() -> ObjectMemory {
-        return ObjectMemory {
+        ObjectMemory {
             heap: Heap::new(),
             object_table: vec![0u16; 64],
             free_pointer_list: NON_POINTER,
             current_segment: 0,
             last_segment: 0,
             limit_in_last_page: 0,
-        };
+        }
     }
 
     #[test]
@@ -730,7 +733,7 @@ impl ObjectMemory {
     fn heap_chunk_of_word(&self, oop: OOP, word_index: u16) -> u16 {
         let seg = self.segment_bits_of(oop) as usize;
         let loc = self.location_bits_of(oop) as usize;
-        return self.heap[seg][loc + word_index as usize];
+        self.heap[seg][loc + word_index as usize]
     }
     /// Writes a word into an object's heap chunk at the given word offset.
     ///
@@ -773,12 +776,12 @@ impl ObjectMemory {
         let loc = self.location_bits_of(oop) as usize;
         let word = self.heap[seg][loc + (byte_index / 2) as usize];
         // Big Endian.
-        if byte_index % 2 == 0 {
+        if byte_index.is_multiple_of(2) {
             // Even byte_index is the upper byte
-            return (word >> 8) as u8;
+            (word >> 8) as u8
         } else {
             // Odd byte_index is the lower byte, so we drop the high byte
-            return (word & 0x00FF) as u8;
+            (word & 0x00FF) as u8
         }
     }
 
@@ -801,14 +804,14 @@ impl ObjectMemory {
         let loc = self.location_bits_of(oop) as usize;
         let mut word = self.heap[seg][loc + (byte_index / 2) as usize];
         // Big Endian.
-        if byte_index % 2 == 0 {
+        if byte_index.is_multiple_of(2) {
             // Even byte_index is the upper byte
-            word = word & 0x00FF;
-            word = word | ((value as u16) << 8);
+            word &= 0x00FF;
+            word |= (value as u16) << 8;
         } else {
             // Odd byte_index is the lower byte
-            word = word & 0xFF00;
-            word = word | value as u16;
+            word &= 0xFF00;
+            word |= value as u16;
         }
         self.heap[seg][loc + (byte_index / 2) as usize] = word;
     }
@@ -827,7 +830,7 @@ impl ObjectMemory {
     //    ↑self heapChunkOf: objectPointer word: 0
     //
     fn size_bits_of(&self, oop: OOP) -> u16 {
-        return self.heap_chunk_of_word(oop, 0);
+        self.heap_chunk_of_word(oop, 0)
     }
 
     /// Sets the size field (word 0) of the object's heap header.
@@ -859,7 +862,7 @@ impl ObjectMemory {
     //    ↑self heapChunkOf: objectPointer word: 1
     //
     fn class_bits_of(&self, oop: OOP) -> u16 {
-        return self.heap_chunk_of_word(oop, 1);
+        self.heap_chunk_of_word(oop, 1)
     }
 
     /// Sets the class field (word 1) of the object's heap header.
@@ -904,6 +907,9 @@ impl ObjectMemory {
     //      inSegment: segment
     //      put: objectPointer
     //
+    // The 'to' here is the Bluebook selector's preposition, not a conversion
+    // prefix, so clippy's naming convention does not apply.
+    #[allow(clippy::wrong_self_convention)]
     fn to_free_chunk_list_add(&mut self, segment: u8, size: u16, chunk_location: u16) {
         // determine which list to insert into
         let list_index = min(size, BIG_SIZE);
@@ -955,7 +961,7 @@ impl ObjectMemory {
         // advance to next chunk
         let next_chunk = self.heap[segment as usize][(target_chunk + 1) as usize];
         self.heap[segment as usize][(FIRST_FREE_CHUNK_LIST + list_index) as usize] = next_chunk;
-        return Ok(target_chunk);
+        Ok(target_chunk)
     }
 }
 
@@ -986,7 +992,7 @@ mod heap_accessor_tests {
         mem.heap[0][14] = 0xCCCC; // ...
         mem.heap[0][15] = 0xDDDD; // field {size} -2 (6-2=4)
 
-        return mem;
+        mem
     }
 
     #[test]
@@ -1076,7 +1082,7 @@ mod heap_free_chunk_tests {
         for i in 0..=(BIG_SIZE as usize) {
             mem.heap[0][(FIRST_FREE_CHUNK_LIST as usize) + i] = NON_POINTER;
         }
-        return mem;
+        mem
     }
 
     #[test]
@@ -1180,7 +1186,7 @@ impl ObjectMemory {
     //    ↑self heapChunkOf: objectPointer word: HeaderSize + fieldIndex
     //
     pub fn fetch_pointer(&self, field_index: u16, pointer: OOP) -> u16 {
-        return self.heap_chunk_of_word(pointer, HEADER_SIZE + field_index);
+        self.heap_chunk_of_word(pointer, HEADER_SIZE + field_index)
     }
 
     /// Store a value to a specific field of an object.
@@ -1227,7 +1233,7 @@ impl ObjectMemory {
     //    ↑self heapChunkOf: objectPointer word: HeaderSize + wordIndex
     //
     pub fn fetch_word(&self, word_index: u16, pointer: OOP) -> u16 {
-        return self.heap_chunk_of_word(pointer, HEADER_SIZE + word_index);
+        self.heap_chunk_of_word(pointer, HEADER_SIZE + word_index)
     }
 
     /// Store a specific word of an object, without accounting for the header offset.
@@ -1262,7 +1268,7 @@ impl ObjectMemory {
     //    ↑self heapChunkOf: objectPointer byte: (HeaderSize*2 + byteIndex)
     //
     pub fn fetch_byte(&self, byte_index: u16, pointer: OOP) -> u8 {
-        return self.heap_chunk_of_byte(pointer, HEADER_SIZE * 2 + byte_index);
+        self.heap_chunk_of_byte(pointer, HEADER_SIZE * 2 + byte_index)
     }
 
     /// Store a specific byte of an object, without accounting for the header offset.
@@ -1302,7 +1308,7 @@ impl ObjectMemory {
     //    ↑(self sizeBitsOf: objectPointer) - HeaderSize
     //
     pub fn fetch_word_length_of(&self, oop: OOP) -> u16 {
-        return self.size_bits_of(oop) - HEADER_SIZE;
+        self.size_bits_of(oop) - HEADER_SIZE
     }
 
     /// Fetch the length of an object in bytes.
@@ -1321,9 +1327,9 @@ impl ObjectMemory {
     //
     pub fn fetch_byte_length_of(&self, oop: OOP) -> u16 {
         if self.odd_bit_of(oop) {
-            return (self.fetch_word_length_of(oop) * 2) - 1;
+            (self.fetch_word_length_of(oop) * 2) - 1
         } else {
-            return self.fetch_word_length_of(oop) * 2;
+            self.fetch_word_length_of(oop) * 2
         }
     }
 
@@ -1349,16 +1355,16 @@ impl ObjectMemory {
     //
     pub fn fetch_class_of(&self, pointer: OOP) -> u16 {
         if pointer.is_integer_object() {
-            return CLASS_SMALL_INTEGER_POINTER;
+            CLASS_SMALL_INTEGER_POINTER
         } else {
-            return self.class_bits_of(pointer);
+            self.class_bits_of(pointer)
         }
     }
 
-    /// The count of an object determines if it will be deallocated or not
-    /// As long as one other object references it, it will not get deleted.
-    /// If an object reaches more than 128 references it will be seen as
-    /// 'saturated' and will never get deallocated.
+    // The count of an object determines if it will be deallocated or not
+    // As long as one other object references it, it will not get deleted.
+    // If an object reaches more than 128 references it will be seen as
+    // 'saturated' and will never get deallocated.
 
     /// Increases the reference count of an OOP.
     ///
@@ -1415,7 +1421,7 @@ impl ObjectMemory {
             // if an object has a count of 0 it would already be deallocated
             return;
         }
-        cnt = cnt - 1;
+        cnt -= 1;
         if cnt == 0 {
             // the object will get deallocated
             let size = self.size_bits_of(oop);
@@ -1489,7 +1495,7 @@ impl ObjectMemory {
             }
         }
 
-        return result;
+        result
     }
 
     /// Creates a new object whose fields are all pointers, initialized to NilPointer.
@@ -1524,7 +1530,7 @@ impl ObjectMemory {
         for i in 0..length {
             self.heap_chunk_of_word_put(oop, HEADER_SIZE + i, NIL_POINTER);
         }
-        return Ok(oop);
+        Ok(oop)
     }
 
     /// Creates a new nonpointer object whose fields are 16-bit words, initialized to 0.
@@ -1558,7 +1564,7 @@ impl ObjectMemory {
         for i in 0..length {
             self.heap_chunk_of_word_put(oop, HEADER_SIZE + i, 0x0000);
         }
-        return Ok(oop);
+        Ok(oop)
     }
 
     /// Creates a new nonpointer object whose fields are 8-bit bytes, initialized to 0.
@@ -1583,7 +1589,7 @@ impl ObjectMemory {
         class: u16,
         length: u16,
     ) -> Result<OOP, ObjectMemoryError> {
-        let size = HEADER_SIZE + (length + 1) / 2;
+        let size = HEADER_SIZE + length.div_ceil(2);
         let result = self.allocate_with_retries(size);
 
         let oop = self.obtain_pointer(size, result?)?;
@@ -1593,7 +1599,7 @@ impl ObjectMemory {
         for i in 0..length {
             self.heap_chunk_of_byte_put(oop, HEADER_SIZE * 2 + i, 0x00);
         }
-        return Ok(oop);
+        Ok(oop)
     }
 }
 
@@ -1641,7 +1647,7 @@ mod api_accessor_tests {
         mem.heap[2][18] = 0xC0FE;
         mem.heap[2][19] = 0xBA00;
 
-        return mem;
+        mem
     }
 
     #[test]
@@ -1773,7 +1779,7 @@ mod ref_counting_tests {
             mem.heap[0][(FIRST_FREE_CHUNK_LIST as usize) + i] = NON_POINTER;
         }
 
-        return mem;
+        mem
     }
 
     // ┌──────────────────────────────────────┐
@@ -2013,7 +2019,7 @@ impl ObjectMemory {
         }
 
         // we found no applicable chunk
-        return Err(ObjectMemoryError::NoFreeEntries);
+        Err(ObjectMemoryError::NoFreeEntries)
     }
 
     /// Fetch a free pointer and return a new 'fresh' object.
@@ -2050,7 +2056,7 @@ impl ObjectMemory {
         self.segment_bits_of_put(oop, self.current_segment);
         self.location_bits_of_put(oop, location);
         self.size_bits_of_put(oop, size);
-        return Ok(oop);
+        Ok(oop)
     }
 
     /// 'Removes' the object from memory.
@@ -2140,7 +2146,7 @@ impl ObjectMemory {
             // save it to the list
             if !self.free_bit_of(oop) && self.segment_bits_of(oop) == self.current_segment {
                 entries.push(Entry {
-                    oop: oop,
+                    oop,
                     location: self.location_bits_of(oop),
                     size: self.size_bits_of(oop),
                 });
@@ -2203,7 +2209,7 @@ mod allocator_tests {
         for i in 0..=(BIG_SIZE as usize) {
             mem.heap[0][(FIRST_FREE_CHUNK_LIST as usize) + i] = NON_POINTER;
         }
-        return mem;
+        mem
     }
 
     // ┌──────────────────────────────────────────────────────┐
@@ -2431,7 +2437,7 @@ mod allocator_tests {
     #[test]
     fn compact_already_packed_is_noop() {
         let mut memory = dummy_memory();
-        let base = (LAST_BIG_CHUNK_LIST + 1) as u16;
+        let base = LAST_BIG_CHUNK_LIST + 1;
 
         // Object already at the lowest possible location
         memory.object_table[0] = 0x0100; // count=1
@@ -2460,7 +2466,7 @@ mod allocator_tests {
 
         memory.compact_current_segment();
 
-        let base = (LAST_BIG_CHUNK_LIST + 1) as u16;
+        let base = LAST_BIG_CHUNK_LIST + 1;
         let free_start = base + 4;
         // The gap between original end (204) and new end should be a free chunk
         let free_size = 204 - free_start;
@@ -2531,7 +2537,7 @@ mod allocator_tests {
         memory.compact_current_segment();
 
         // OOP 0 should have moved (segment 0 was compacted)
-        let base = (LAST_BIG_CHUNK_LIST + 1) as u16;
+        let base = LAST_BIG_CHUNK_LIST + 1;
         assert_eq!(memory.location_bits_of(OOP::from_raw(0)), base);
         // OOP 2 should be untouched (segment 1)
         assert_eq!(memory.location_bits_of(OOP::from_raw(2)), 100);
@@ -2584,7 +2590,7 @@ mod instantiation_tests {
             mem.to_free_pointer_list_add(OOP::from_raw(oop as u16));
         }
 
-        return mem;
+        mem
     }
 
     // ┌──────────────────────────────────────────────┐

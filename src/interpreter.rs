@@ -31,10 +31,10 @@ impl MethodCacheEntry {
 
     fn new(selector: OOP, class: OOP, method: OOP, primitive_index: u8) -> Self {
         MethodCacheEntry {
-            selector: selector,
-            class: class,
-            method: method,
-            primitive_index: primitive_index,
+            selector,
+            class,
+            method,
+            primitive_index,
         }
     }
 }
@@ -905,9 +905,9 @@ impl Interpreter {
     fn primitive_index_of(&self, method_pointer: OOP) -> u16 {
         let flag_value = self.flag_value_of(method_pointer);
         if flag_value == 7 {
-            return Self::extract_bits(7, 14, self.header_extension_of(method_pointer).value);
+            Self::extract_bits(7, 14, self.header_extension_of(method_pointer).value)
         } else {
-            return 0;
+            0
         }
     }
 
@@ -2260,7 +2260,7 @@ mod tests {
                 // two header words count as the first four bytes.
                 let raw = (HEADER_SIZE * 2 + FIRST_BYTECODE_BYTE) as usize + offset;
                 let word = METHOD_LOCATION as usize + raw / 2;
-                self.seg[word] = if raw % 2 == 0 {
+                self.seg[word] = if raw.is_multiple_of(2) {
                     (self.seg[word] & 0x00FF) | ((byte as u16) << 8)
                 } else {
                     (self.seg[word] & 0xFF00) | byte as u16
