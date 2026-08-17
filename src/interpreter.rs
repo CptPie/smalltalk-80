@@ -11,6 +11,34 @@ use crate::{
     oop::OOP,
 };
 
+#[derive(Clone, Copy)]
+struct MethodCacheEntry {
+    selector: OOP,
+    class: OOP,
+    method: OOP,
+    primitive_index: u8,
+}
+
+impl MethodCacheEntry {
+    fn new_empty() -> Self {
+        MethodCacheEntry {
+            selector: OOP::from_raw(NIL_POINTER),
+            class: OOP::from_raw(NIL_POINTER),
+            method: OOP::from_raw(NIL_POINTER),
+            primitive_index: 0,
+        }
+    }
+
+    fn new(selector: OOP, class: OOP, method: OOP, primitive_index: u8) -> Self {
+        MethodCacheEntry {
+            selector: selector,
+            class: class,
+            method: method,
+            primitive_index: primitive_index,
+        }
+    }
+}
+
 pub struct Interpreter {
     memory: ObjectMemory,
 
@@ -30,6 +58,8 @@ pub struct Interpreter {
     primitive_index: u8,
 
     current_bytecode: u8,
+
+    method_cache: [MethodCacheEntry; 256],
 }
 
 impl Interpreter {
@@ -47,6 +77,7 @@ impl Interpreter {
             new_method: OOP::from_raw(NIL_POINTER),
             primitive_index: 0,
             current_bytecode: 0,
+            method_cache: [MethodCacheEntry::new_empty(); 256],
         };
         interpreter.fetch_context_registers();
         interpreter
@@ -244,6 +275,10 @@ impl Interpreter {
     //   method ← memory fetchPointer: MethodIndex ofObject: homeContext.
     //   instructionPointer ← (self instructionPointerOfContext: activeContext) - 1.
     //   stackPointer ← (self stackPointerOfContext: activeContext) + TempFrameStart - 1
+    //
+    // pc and sp are SmallIntegers; the stored pc is a 1-relative byte index and the
+    // stored sp is relative to the temp frame start, so both are normalized to
+    // 0-relative indices here (and converted back in store_context_registers).
     fn fetch_context_registers(&mut self) {
         self.home_context = if self.is_block_context(self.active_context) {
             OOP::from_raw(self.memory.fetch_pointer(HOME_INDEX, self.active_context))
@@ -253,25 +288,11 @@ impl Interpreter {
         self.receiver = OOP::from_raw(self.memory.fetch_pointer(RECEIVER_INDEX, self.home_context));
         self.method = OOP::from_raw(self.memory.fetch_pointer(METHOD_INDEX, self.home_context));
 
-        // pc and sp are SmallIntegers; the stored pc is a 1-relative byte index and the
-        // stored sp is relative to the temp frame start, so both are normalized to
-        // 0-relative indices here (and converted back in store_context_registers).
-        let pc_oop = OOP::from_raw(
-            self.memory
-                .fetch_pointer(INSTRUCTION_POINTER_INDEX, self.active_context),
-        );
-        let sp_oop = OOP::from_raw(
-            self.memory
-                .fetch_pointer(STACK_POINTER_INDEX, self.active_context),
-        );
-        let pc = pc_oop
-            .integer_value_of()
-            .unwrap_or_else(|_| self.vm_panic("context pc is not a SmallInteger"));
-        let sp = sp_oop
-            .integer_value_of()
-            .unwrap_or_else(|_| self.vm_panic("context sp is not a SmallInteger"));
-        self.ip = (pc - 1) as usize;
-        self.sp = (sp + TEMP_FRAME_START as i16 - 1) as usize;
+        self.ip = (self.fetch_integer_of_object(INSTRUCTION_POINTER_INDEX, self.active_context) - 1)
+            as usize;
+        self.sp = (self.fetch_integer_of_object(STACK_POINTER_INDEX, self.active_context)
+            + TEMP_FRAME_START as i16
+            - 1) as usize;
     }
 
     /// Writes the cached ip and sp registers back into the active context object on
@@ -286,14 +307,142 @@ impl Interpreter {
     //   self storeInstructionPointerValue: instructionPointer + 1 inContext: activeContext.
     //   self storeStackPointerValue: stackPointer - TempFrameStart + 1 inContext: activeContext
     fn store_context_registers(&mut self) {
-        let pc_oop = OOP::integer_object_of(self.ip as i16 + 1)
-            .unwrap_or_else(|_| self.vm_panic("pc out of SmallInteger range"));
-        let sp_oop = OOP::integer_object_of(self.sp as i16 - TEMP_FRAME_START as i16 + 1)
-            .unwrap_or_else(|_| self.vm_panic("sp out of SmallInteger range"));
+        self.store_instruction_pointer_value_in_context(self.ip as i16 + 1, self.active_context);
+        self.store_stack_pointer_value_in_context(
+            self.sp as i16 - TEMP_FRAME_START as i16 + 1,
+            self.active_context,
+        );
+    }
+
+    /// Reads a field of an object and untags it as a SmallInteger.
+    ///
+    /// # Parameters:
+    ///     * field_index (u16): The 0 indexed field that shall be fetched
+    ///     * object_pointer (OOP): The pointer to the object
+    ///
+    /// # Returns:
+    ///     * i16, the value of the SmallInteger held in that field
+    //
+    // see Bluebook p. 574
+    //
+    // fetchInteger: fieldIndex ofObject: objectPointer
+    //   | integerPointer |
+    //   integerPointer ← memory fetchPointer: fieldIndex
+    //                           ofObject: objectPointer.
+    //   (memory isIntegerObject: integerPointer)
+    //     ifTrue: [↑memory integerValueOf: integerPointer]
+    //     ifFalse: [↑self primitiveFail]
+    //
+    // Fails the same way its storing counterpart does, and for the same reason.
+    fn fetch_integer_of_object(&self, field_index: u16, object_pointer: OOP) -> i16 {
+        let integer_pointer = OOP::from_raw(self.memory.fetch_pointer(field_index, object_pointer));
+        integer_pointer.integer_value_of().unwrap_or_else(|_| {
+            self.vm_panic(&format!(
+                "field {field_index} of {:#06x} is not a SmallInteger",
+                object_pointer.value
+            ))
+        })
+    }
+
+    /// Tags a value as a SmallInteger and stores it into a field of an object.
+    ///
+    /// # Parameters:
+    ///     * field_index (u16): The 0 indexed field that shall be written
+    ///     * object_pointer (OOP): The pointer to the object
+    ///     * integer_value (i16): The value to tag and store
+    //
+    // see Bluebook p. 574
+    //
+    // storeInteger: fieldIndex ofObject: objectPointer withValue: integerValue
+    //   | integerPointer |
+    //   (memory isIntegerValue: integerValue)
+    //     ifTrue: [integerPointer ← memory integerObjectOf: integerValue.
+    //              memory storePointer: fieldIndex
+    //                     ofObject: objectPointer
+    //                     withValue: integerPointer]
+    //     ifFalse: [↑self primitiveFail]
+    //
+    // The book fails this routine into primitiveFail because chapter 29's primitives
+    // share it, and a value out of SmallInteger range is an ordinary primitive
+    // failure there. Every caller here is the interpreter storing its own context
+    // registers, where the same condition means the image is broken, so it panics
+    // until there is a success flag to fail into.
+    fn store_integer_of_object_with_value(
+        &mut self,
+        field_index: u16,
+        object_pointer: OOP,
+        integer_value: i16,
+    ) {
+        let integer_pointer = OOP::integer_object_of(integer_value).unwrap_or_else(|_| {
+            self.vm_panic(&format!(
+                "value {integer_value} is out of SmallInteger range"
+            ))
+        });
         self.memory
-            .store_pointer(INSTRUCTION_POINTER_INDEX, self.active_context, pc_oop.value);
-        self.memory
-            .store_pointer(STACK_POINTER_INDEX, self.active_context, sp_oop.value);
+            .store_pointer(field_index, object_pointer, integer_pointer.value);
+    }
+
+    /// Writes an instruction pointer into a context as a SmallInteger.
+    ///
+    /// The stored value is 1-relative, the way a context holds it, so callers pass
+    /// ip + 1 rather than the cached register itself.
+    ///
+    /// # Parameters:
+    ///     * value (i16): The 1-relative instruction pointer to store
+    ///     * context_pointer (OOP): The context to store it into
+    //
+    // see Bluebook p. 582
+    //
+    // storeInstructionPointerValue: value inContext: contextPointer
+    //   self storeInteger: InstructionPointerIndex
+    //        ofObject: contextPointer
+    //        withValue: value
+    fn store_instruction_pointer_value_in_context(&mut self, value: i16, context_pointer: OOP) {
+        self.store_integer_of_object_with_value(INSTRUCTION_POINTER_INDEX, context_pointer, value);
+    }
+
+    /// Writes a stack pointer into a context as a SmallInteger.
+    ///
+    /// The stored value counts fields past the start of the temporary frame, not
+    /// past the start of the object, so callers subtract TempFrameStart first.
+    ///
+    /// # Parameters:
+    ///     * value (i16): The stack pointer, relative to the temporary frame
+    ///     * context_pointer (OOP): The context to store it into
+    //
+    // see Bluebook p. 583
+    //
+    // storeStackPointerValue: value inContext: contextPointer
+    //   self storeInteger: StackPointerIndex
+    //        ofObject: contextPointer
+    //        withValue: value
+    fn store_stack_pointer_value_in_context(&mut self, value: i16, context_pointer: OOP) {
+        self.store_integer_of_object_with_value(STACK_POINTER_INDEX, context_pointer, value);
+    }
+
+    /// Makes another context the active one, saving the registers of the context
+    /// being left and loading those of the context being entered.
+    ///
+    /// This is the only way the active context is allowed to change, so that the
+    /// cached registers and the context objects on the heap never disagree.
+    ///
+    /// # Parameters:
+    ///     * a_context (OOP): The context to switch to
+    //
+    // see Bluebook p. 585
+    //
+    // newActiveContext: aContext
+    //   self storeContextRegisters.
+    //   memory decreaseReferencesTo: activeContext.
+    //   activeContext ← aContext.
+    //   memory increaseReferencesTo: activeContext.
+    //   self fetchContextRegisters
+    fn new_active_context(&mut self, a_context: OOP) {
+        self.store_context_registers();
+        self.memory.decrease_references_to(self.active_context);
+        self.active_context = a_context;
+        self.memory.increase_references_to(self.active_context);
+        self.fetch_context_registers();
     }
 
     /// Determines whether a context is a BlockContext or a MethodContext.
@@ -1053,6 +1202,146 @@ impl Interpreter {
         self.pop(self.argument_count as usize);
         self.push(message);
         self.argument_count = 1
+    }
+
+    /// Loads the send registers from a selector and an argument count, then starts
+    /// the lookup in the class of the receiver.
+    ///
+    /// The receiver sits underneath its arguments on the stack, so stack_value with
+    /// the argument count as its offset reaches past them to find it. Everything
+    /// below this point reads the receiver out of the registers rather than off the
+    /// stack, which is what lets send_must_be_boolean and the doesNotUnderstand:
+    /// path re-enter the machinery with a message the compiler never emitted.
+    ///
+    /// # Parameters:
+    ///     * selector (OOP): The selector to send
+    ///     * count (u8): How many arguments are on the stack above the receiver
+    //
+    // see Bluebook p. 604
+    //
+    // sendSelector: selector argumentCount: count
+    //   | newReceiver |
+    //   messageSelector ← selector.
+    //   argumentCount ← count.
+    //   newReceiver ← self stackValue: argumentCount.
+    //   self sendSelectorToClass: (memory fetchClassOf: newReceiver)
+    fn send_selector_argument_count(&mut self, selector: OOP, count: u8) {
+        todo!()
+    }
+
+    /// Looks the current message up starting in a given class and runs what it finds.
+    ///
+    /// Kept separate from send_selector_argument_count because the super sends begin
+    /// their lookup somewhere other than the receiver's class.
+    ///
+    /// # Parameters:
+    ///     * class_pointer (OOP): The class to begin the lookup in
+    //
+    // see Bluebook p. 605
+    //
+    // sendSelectorToClass: classPointer
+    //   self findNewMethodInClass: classPointer.
+    //   self executeNewMethod
+    fn send_selector_to_class(&mut self, class_pointer: OOP) {
+        todo!()
+    }
+
+    /// Finds the method for message_selector in a class, consulting the method cache
+    /// before falling back on a walk of the superclass chain.
+    ///
+    /// The cache is a pure accelerator: lookup_method_in_class on its own is already
+    /// a correct implementation. Every hit is checked against both the selector and
+    /// the class it was recorded for, and there are no reprobes, so a collision only
+    /// ever costs a miss.
+    ///
+    /// # Parameters:
+    ///     * class (OOP): The class to begin the lookup in
+    //
+    // see Bluebook p. 605
+    //
+    // findNewMethodInClass: class
+    //   | hash |
+    //   hash ← (((messageSelector bitAnd: class) bitAnd: 16rFF) bitShift: 2) + 1.
+    //   ((methodCache at: hash) = messageSelector
+    //       and: [(methodCache at: hash + 1) = class])
+    //     ifTrue: [newMethod ← methodCache at: hash + 2.
+    //              primitiveIndex ← methodCache at: hash + 3]
+    //     ifFalse: [self lookupMethodInClass: class.
+    //               methodCache at: hash put: messageSelector.
+    //               methodCache at: hash + 1 put: class.
+    //               methodCache at: hash + 2 put: newMethod.
+    //               methodCache at: hash + 3 put: primitiveIndex]
+    //
+    // initializeMethodCache
+    //   methodCacheSize ← 1024.
+    //   methodCache ← Array new: methodCacheSize
+    //
+    // The book's four consecutive Array slots become one struct per entry, so the
+    // hash indexes an entry directly and the + 1 that Smalltalk's 1-relative Arrays
+    // need falls away.
+    fn find_new_method_in_class(&mut self, class: OOP) {
+        todo!()
+    }
+
+    /// Runs new_method, either as a primitive or by activating its bytecodes.
+    //
+    // see Bluebook p. 605
+    //
+    // executeNewMethod
+    //   self primitiveResponse
+    //     ifFalse: [self activateNewMethod]
+    fn execute_new_method(&mut self) {
+        todo!()
+    }
+
+    /// Attempts to answer the current message with a primitive routine.
+    ///
+    /// # Returns:
+    ///     * bool, true if the primitive produced a result and the send is complete
+    //
+    // see Bluebook p. 605, specified in chapter 29
+    //
+    // Reporting failure is what the specification prescribes when a method has no
+    // primitive or its primitive cannot produce a result, and it means the method's
+    // Smalltalk body runs instead. Until chapter 29 exists this reports failure
+    // unconditionally, which is correct for every method that has a fallback body.
+    fn primitive_response(&mut self) -> bool {
+        false
+    }
+
+    /// Builds a MethodContext for new_method, moves the receiver and arguments into
+    /// it off the sending context's stack, and enters it.
+    ///
+    /// The new context is sized from the method's large context flag rather than
+    /// from what the method actually needs. Only those two sizes are ever allocated
+    /// for contexts, which is what lets the object memory recycle them cheaply.
+    //
+    // see Bluebook p. 606
+    //
+    // activateNewMethod
+    //   | contextSize newContext |
+    //   (self largeContextFlagOf: newMethod) = 1
+    //     ifTrue: [contextSize ← 32 + TempFrameStart]
+    //     ifFalse: [contextSize ← 12 + TempFrameStart].
+    //   newContext ← memory instantiateClass: ClassMethodContextPointer
+    //                       withPointers: contextSize.
+    //   memory storePointer: SenderIndex
+    //          ofObject: newContext
+    //          withValue: activeContext.
+    //   self storeInstructionPointerValue: (self initialInstructionPointerOfMethod: newMethod)
+    //        inContext: newContext.
+    //   self storeStackPointerValue: (self temporaryCountOf: newMethod)
+    //        inContext: newContext.
+    //   memory storePointer: MethodIndex
+    //          ofObject: newContext
+    //          withValue: newMethod.
+    //   self transfer: argumentCount + 1
+    //        fromIndex: stackPointer-argumentCount ofObject: activeContext
+    //        toIndex: ReceiverIndex ofObject: newContext.
+    //   self pop: argumentCount + 1.
+    //   self newActiveContext: newContext
+    fn activate_new_method(&mut self) {
+        todo!()
     }
 
     /// Extracts the receiver-variable field index from the current bytecode and
