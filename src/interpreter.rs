@@ -2213,6 +2213,14 @@ mod tests {
     const METHOD_Y_OOP: u16 = 78;
     const METHOD_DNU_OOP: u16 = 80;
 
+    // A third class above the other two. The super sends only mean anything when
+    // the class a method was found in differs from the class of the receiver
+    // running it, which needs one more link than a receiver and its superclass.
+    const ROOT_CLASS_OOP: u16 = 88;
+    const ROOT_DICTIONARY_OOP: u16 = 90;
+    const ROOT_METHODS_OOP: u16 = 92;
+    const METHOD_Z_OOP: u16 = 94;
+
     // Selector OOPs are only ever compared and hashed, never dereferenced, so
     // what matters is their numeric value. hash is the pointer shifted right one
     // and the slot is (mask & hash) + SelectorStart, so with eight slots 82 and
@@ -2237,6 +2245,11 @@ mod tests {
     /// Selector slots per message dictionary. Must be a power of two: the probe
     /// reduces the hash modulo this by masking, which is only correct then.
     const SELECTOR_SLOTS: u16 = 8;
+
+    /// Fields in the shared special selector Array: two per selector, the
+    /// selector itself and then its argument count, for the 32 bytecodes 176
+    /// through 207.
+    const SPECIAL_SELECTOR_FIELDS: u16 = 64;
 
     // Sized past what the single byte forms can address, so the extended
     // bytecodes have somewhere to reach that the short ones cannot: the short
@@ -2275,6 +2288,11 @@ mod tests {
     const SELECTOR_ABSENT_LOCATION: u16 = 570;
     const SELECTOR_COLLIDES_LOCATION: u16 = 580;
     const DNU_SELECTOR_LOCATION: u16 = 590;
+    const SPECIAL_SELECTORS_LOCATION: u16 = 600;
+    const ROOT_CLASS_LOCATION: u16 = 680;
+    const ROOT_DICTIONARY_LOCATION: u16 = 690;
+    const ROOT_METHODS_LOCATION: u16 = 710;
+    const METHOD_Z_LOCATION: u16 = 730;
 
     /// A single free chunk covering the tail of the segment, so that the object
     /// memory has somewhere to allocate from. Large enough to land on the big
@@ -2358,9 +2376,21 @@ mod tests {
             );
             Self::place(&mut ot, &mut seg, ASSOCIATION_OOP, ASSOCIATION_LOCATION, 2);
 
+            // The Array the special selector bytecodes read their selector and
+            // argument count out of. Shared by every CompiledMethod in a real
+            // image, which is why it is a well known pointer rather than a literal.
+            Self::place(
+                &mut ot,
+                &mut seg,
+                SPECIAL_SELECTORS_ARRAY_POINTER,
+                SPECIAL_SELECTORS_LOCATION,
+                SPECIAL_SELECTOR_FIELDS,
+            );
+
             // The class chain and its message dictionaries.
             Self::place(&mut ot, &mut seg, SUBCLASS_OOP, SUBCLASS_LOCATION, 3);
             Self::place(&mut ot, &mut seg, SUPERCLASS_OOP, SUPERCLASS_LOCATION, 3);
+            Self::place(&mut ot, &mut seg, ROOT_CLASS_OOP, ROOT_CLASS_LOCATION, 3);
             Self::place(
                 &mut ot,
                 &mut seg,
@@ -2389,6 +2419,20 @@ mod tests {
                 SUPERCLASS_METHODS_LOCATION,
                 SELECTOR_SLOTS,
             );
+            Self::place(
+                &mut ot,
+                &mut seg,
+                ROOT_DICTIONARY_OOP,
+                ROOT_DICTIONARY_LOCATION,
+                SELECTOR_START + SELECTOR_SLOTS,
+            );
+            Self::place(
+                &mut ot,
+                &mut seg,
+                ROOT_METHODS_OOP,
+                ROOT_METHODS_LOCATION,
+                SELECTOR_SLOTS,
+            );
 
             // Three CompiledMethods to find. X and the doesNotUnderstand: one
             // carry a plain header; Y has flag value 7 so that a lookup can be
@@ -2396,11 +2440,13 @@ mod tests {
             Self::place(&mut ot, &mut seg, METHOD_X_OOP, METHOD_X_LOCATION, 1);
             Self::place(&mut ot, &mut seg, METHOD_Y_OOP, METHOD_Y_LOCATION, 3);
             Self::place(&mut ot, &mut seg, METHOD_DNU_OOP, METHOD_DNU_LOCATION, 1);
+            Self::place(&mut ot, &mut seg, METHOD_Z_OOP, METHOD_Z_LOCATION, 1);
             seg[(METHOD_X_LOCATION + HEADER_SIZE) as usize] = method_header(0, 0, false, 0);
             seg[(METHOD_Y_LOCATION + HEADER_SIZE) as usize] = method_header(7, 0, false, 2);
             seg[(METHOD_Y_LOCATION + HEADER_SIZE + LITERAL_START) as usize] =
                 header_extension(1, 70);
             seg[(METHOD_DNU_LOCATION + HEADER_SIZE) as usize] = method_header(1, 0, false, 0);
+            seg[(METHOD_Z_LOCATION + HEADER_SIZE) as usize] = method_header(0, 0, false, 0);
 
             // Selectors. Only their OOP values matter to the probe, but they need
             // object table entries because storing one into a Message counts it up.
@@ -2446,9 +2492,12 @@ mod tests {
             seg[(SUBCLASS_LOCATION + HEADER_SIZE + SUPERCLASS_INDEX) as usize] = SUPERCLASS_OOP;
             seg[(SUBCLASS_LOCATION + HEADER_SIZE + MESSAGE_DICTIONARY_INDEX) as usize] =
                 SUBCLASS_DICTIONARY_OOP;
-            seg[(SUPERCLASS_LOCATION + HEADER_SIZE + SUPERCLASS_INDEX) as usize] = NIL_POINTER;
+            seg[(SUPERCLASS_LOCATION + HEADER_SIZE + SUPERCLASS_INDEX) as usize] = ROOT_CLASS_OOP;
             seg[(SUPERCLASS_LOCATION + HEADER_SIZE + MESSAGE_DICTIONARY_INDEX) as usize] =
                 SUPERCLASS_DICTIONARY_OOP;
+            seg[(ROOT_CLASS_LOCATION + HEADER_SIZE + SUPERCLASS_INDEX) as usize] = NIL_POINTER;
+            seg[(ROOT_CLASS_LOCATION + HEADER_SIZE + MESSAGE_DICTIONARY_INDEX) as usize] =
+                ROOT_DICTIONARY_OOP;
 
             // Both dictionaries start empty. The probe stops on nil, so the
             // selector slots must hold nil rather than the SmallInteger that
@@ -2456,6 +2505,7 @@ mod tests {
             for (dictionary, methods) in [
                 (SUBCLASS_DICTIONARY_LOCATION, SUBCLASS_METHODS_OOP),
                 (SUPERCLASS_DICTIONARY_LOCATION, SUPERCLASS_METHODS_OOP),
+                (ROOT_DICTIONARY_LOCATION, ROOT_METHODS_OOP),
             ] {
                 seg[(dictionary + HEADER_SIZE + METHOD_ARRAY_INDEX) as usize] = methods;
                 for slot in 0..SELECTOR_SLOTS {
@@ -2540,6 +2590,31 @@ mod tests {
 
         fn association_value(&mut self, value: u16) -> &mut Self {
             self.seg[(ASSOCIATION_LOCATION + HEADER_SIZE + VALUE_INDEX) as usize] = value;
+            self
+        }
+
+        /// Names the class the running method was found in, which is what the
+        /// super sends start their lookup above.
+        ///
+        /// methodClassOf reads the method's last literal as an Association and
+        /// takes its value, so this points that literal at the fixture's
+        /// association and sets the association's value.
+        fn method_class(&mut self, class: u16) -> &mut Self {
+            self.literal(LITERAL_COUNT - 1, ASSOCIATION_OOP);
+            self.association_value(class)
+        }
+
+        /// Fills one entry of the special selector Array: the selector in the
+        /// even slot, its argument count as a SmallInteger in the odd one.
+        fn special_selector(
+            &mut self,
+            index: u16,
+            selector: u16,
+            argument_count: u16,
+        ) -> &mut Self {
+            let base = SPECIAL_SELECTORS_LOCATION + HEADER_SIZE + index * 2;
+            self.seg[base as usize] = selector;
+            self.seg[(base + 1) as usize] = small_int(argument_count);
             self
         }
 
@@ -3587,6 +3662,15 @@ mod tests {
     }
 
     /// Installs a selector in the superclass's dictionary.
+    fn in_root_class(fixture: &mut Fixture, selector: u16, method: u16) -> &mut Fixture {
+        fixture.dictionary_entry(
+            ROOT_DICTIONARY_LOCATION,
+            ROOT_METHODS_LOCATION,
+            selector,
+            method,
+        )
+    }
+
     fn in_superclass(fixture: &mut Fixture, selector: u16, method: u16) -> &mut Fixture {
         fixture.dictionary_entry(
             SUPERCLASS_DICTIONARY_LOCATION,
@@ -3657,6 +3741,10 @@ mod tests {
         );
         assert_eq!(
             interpreter.superclass_of(OOP::from_raw(SUPERCLASS_OOP)),
+            OOP::from_raw(ROOT_CLASS_OOP)
+        );
+        assert_eq!(
+            interpreter.superclass_of(OOP::from_raw(ROOT_CLASS_OOP)),
             OOP::from_raw(NIL_POINTER)
         );
     }
@@ -3967,5 +4055,226 @@ mod tests {
             small_int_oop(TEMP_COUNT),
             "the stored sp is back to an empty stack"
         );
+    }
+
+    // ┌─────────────────────┐
+    // │   SEND BYTECODES    │
+    // └─────────────────────┘
+
+    /// The literal index a test selector is parked at. Past the 16 the literal
+    /// selector bytecodes can name, so the extended forms have somewhere to
+    /// reach that the short one cannot.
+    const EXTENDED_SELECTOR_LITERAL: u16 = 20;
+
+    /// The literal index the short send tests use. Deliberately 8 or above, so
+    /// that the four bit selector field can be told apart from a three bit one.
+    const SHORT_SELECTOR_LITERAL: u16 = 11;
+
+    #[test]
+    fn send_literal_selector_bytecode_names_a_literal_and_no_arguments() {
+        // 208 plus the literal index is the literal selector send with no
+        // arguments.
+        let mut fixture = Fixture::new();
+        fixture
+            .literal(SHORT_SELECTOR_LITERAL, SELECTOR_ONE_OOP)
+            .bytecodes(&[112, 208 + SHORT_SELECTOR_LITERAL as u8]);
+        in_subclass(&mut fixture, SELECTOR_ONE_OOP, METHOD_X_OOP);
+        let mut interpreter = fixture.build();
+
+        interpreter.cycle();
+        interpreter.cycle();
+
+        assert_eq!(
+            interpreter.message_selector,
+            OOP::from_raw(SELECTOR_ONE_OOP)
+        );
+        assert_eq!(interpreter.argument_count, 0);
+        assert_eq!(interpreter.new_method, OOP::from_raw(METHOD_X_OOP));
+    }
+
+    #[test]
+    fn send_literal_selector_bytecode_decodes_all_three_argument_counts() {
+        // The three bands are 208, 224 and 240, each covering the same sixteen
+        // literals. The selector index is deliberately not zero: subtracting one
+        // from the bytecode instead of from the extracted field agrees with the
+        // specification only when the low nibble is clear.
+        let literal = SHORT_SELECTOR_LITERAL as u8;
+        for (bytecode, expected) in [(208 + literal, 0u8), (224 + literal, 1), (240 + literal, 2)] {
+            let mut pushes = vec![112u8; expected as usize + 1];
+            pushes.push(bytecode);
+
+            let mut fixture = Fixture::new();
+            fixture
+                .literal(SHORT_SELECTOR_LITERAL, SELECTOR_ONE_OOP)
+                .bytecodes(&pushes);
+            in_subclass(&mut fixture, SELECTOR_ONE_OOP, METHOD_X_OOP);
+            let mut interpreter = fixture.build();
+
+            for _ in 0..pushes.len() {
+                interpreter.cycle();
+            }
+
+            assert_eq!(
+                interpreter.argument_count, expected,
+                "bytecode {bytecode} should take {expected} arguments"
+            );
+            assert_eq!(
+                interpreter.message_selector,
+                OOP::from_raw(SELECTOR_ONE_OOP)
+            );
+        }
+    }
+
+    #[test]
+    fn single_extended_send_reaches_a_literal_past_the_short_form() {
+        // Descriptor: argument count in the high three bits, selector index in
+        // the low five. One argument, literal 20.
+        let descriptor = (1 << 5) | EXTENDED_SELECTOR_LITERAL as u8;
+
+        let mut fixture = Fixture::new();
+        fixture
+            .literal(EXTENDED_SELECTOR_LITERAL, SELECTOR_ONE_OOP)
+            .bytecodes(&[112, 112, 131, descriptor]);
+        in_subclass(&mut fixture, SELECTOR_ONE_OOP, METHOD_X_OOP);
+        let mut interpreter = fixture.build();
+
+        interpreter.cycle();
+        interpreter.cycle();
+        interpreter.cycle();
+
+        assert_eq!(
+            interpreter.message_selector,
+            OOP::from_raw(SELECTOR_ONE_OOP)
+        );
+        assert_eq!(interpreter.argument_count, 1);
+        assert_eq!(interpreter.new_method, OOP::from_raw(METHOD_X_OOP));
+    }
+
+    #[test]
+    fn double_extended_send_takes_its_count_then_its_selector() {
+        // Literal 35 is past what even the single extended form's five bits can
+        // name, so only the double extended send can reach it.
+        let mut fixture = Fixture::new();
+        fixture
+            .literal(35, SELECTOR_ONE_OOP)
+            .bytecodes(&[112, 112, 112, 132, 2, 35]);
+        in_subclass(&mut fixture, SELECTOR_ONE_OOP, METHOD_X_OOP);
+        let mut interpreter = fixture.build();
+
+        interpreter.cycle();
+        interpreter.cycle();
+        interpreter.cycle();
+        interpreter.cycle();
+
+        assert_eq!(
+            interpreter.message_selector,
+            OOP::from_raw(SELECTOR_ONE_OOP)
+        );
+        assert_eq!(interpreter.argument_count, 2);
+        assert_eq!(interpreter.new_method, OOP::from_raw(METHOD_X_OOP));
+    }
+
+    /// Installs one selector in all three classes, answering a different method
+    /// in each, and names the middle class as the one the running method belongs
+    /// to.
+    ///
+    /// The receiver is an instance of the subclass while the running method was
+    /// found in the superclass, which is the situation super exists for and the
+    /// only one that tells the three plausible starting points apart:
+    ///
+    /// | lookup starts at              | answers  |
+    /// |-------------------------------|----------|
+    /// | the receiver's class          | method X |
+    /// | above the receiver's class    | method Y |
+    /// | above the method's class      | method Z |
+    ///
+    /// Only the last is correct. A fixture whose method class and receiver class
+    /// are the same collapses the last two rows and cannot tell them apart.
+    fn super_fixture(bytecodes: &[u8]) -> Interpreter {
+        let mut fixture = Fixture::new();
+        fixture
+            .literal(SHORT_SELECTOR_LITERAL, SELECTOR_ONE_OOP)
+            .bytecodes(bytecodes);
+        fixture.method_class(SUPERCLASS_OOP);
+        in_subclass(&mut fixture, SELECTOR_ONE_OOP, METHOD_X_OOP);
+        in_superclass(&mut fixture, SELECTOR_ONE_OOP, METHOD_Y_OOP);
+        in_root_class(&mut fixture, SELECTOR_ONE_OOP, METHOD_Z_OOP);
+        fixture.build()
+    }
+
+    #[test]
+    fn an_ordinary_send_finds_the_receivers_own_method() {
+        // The control for the two super tests: same fixture, same selector, but
+        // the lookup starts at the receiver's class.
+        let mut interpreter = super_fixture(&[112, 208 + SHORT_SELECTOR_LITERAL as u8]);
+
+        interpreter.cycle();
+        interpreter.cycle();
+
+        assert_eq!(interpreter.new_method, OOP::from_raw(METHOD_X_OOP));
+    }
+
+    #[test]
+    fn single_extended_super_starts_above_the_methods_own_class() {
+        let mut interpreter = super_fixture(&[112, 133, SHORT_SELECTOR_LITERAL as u8]);
+
+        interpreter.cycle();
+        interpreter.cycle();
+
+        assert_eq!(
+            interpreter.message_selector,
+            OOP::from_raw(SELECTOR_ONE_OOP)
+        );
+        assert_eq!(interpreter.argument_count, 0);
+        assert_eq!(
+            interpreter.new_method,
+            OOP::from_raw(METHOD_Z_OOP),
+            "the lookup starts above the method's class, not above the receiver's"
+        );
+    }
+
+    #[test]
+    fn double_extended_super_starts_above_the_methods_own_class() {
+        let mut interpreter = super_fixture(&[112, 134, 0, SHORT_SELECTOR_LITERAL as u8]);
+
+        interpreter.cycle();
+        interpreter.cycle();
+
+        assert_eq!(
+            interpreter.message_selector,
+            OOP::from_raw(SELECTOR_ONE_OOP)
+        );
+        assert_eq!(interpreter.argument_count, 0);
+        assert_eq!(interpreter.new_method, OOP::from_raw(METHOD_Z_OOP));
+    }
+
+    #[test]
+    fn send_special_selector_bytecode_indexes_the_shared_array() {
+        // Bytecode 181 is special selector 5, which lives at fields 10 and 11 of
+        // the Array. Every other entry answers a different method, so reaching
+        // the wrong pair is visible rather than merely unlucky.
+        let mut fixture = Fixture::new();
+        fixture.bytecodes(&[112, 112, 181]);
+        for index in 0..SPECIAL_SELECTOR_FIELDS / 2 {
+            fixture.special_selector(index, SELECTOR_COLLIDES_WITH_ONE_OOP, 0);
+        }
+        fixture.special_selector(5, SELECTOR_ONE_OOP, 1);
+        in_subclass(&mut fixture, SELECTOR_ONE_OOP, METHOD_X_OOP);
+        in_subclass(&mut fixture, SELECTOR_COLLIDES_WITH_ONE_OOP, METHOD_Y_OOP);
+        let mut interpreter = fixture.build();
+
+        interpreter.cycle();
+        interpreter.cycle();
+        interpreter.cycle();
+
+        assert_eq!(
+            interpreter.message_selector,
+            OOP::from_raw(SELECTOR_ONE_OOP)
+        );
+        assert_eq!(
+            interpreter.argument_count, 1,
+            "the count comes from the slot after the selector"
+        );
+        assert_eq!(interpreter.new_method, OOP::from_raw(METHOD_X_OOP));
     }
 }
