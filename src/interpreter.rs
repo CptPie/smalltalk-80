@@ -1,11 +1,12 @@
 use crate::{
     globalconstants::{
-        CLASS_ARRAY_POINTER, CLASS_MESSAGE_POINTER, DOES_NOT_UNDERSTAND_SELECTOR, FALSE_POINTER,
-        HEADER_INDEX, HOME_INDEX, INSTRUCTION_POINTER_INDEX, LITERAL_START,
-        MESSAGE_ARGUMENTS_INDEX, MESSAGE_DICTIONARY_INDEX, MESSAGE_SELECTOR_INDEX, MESSAGE_SIZE,
-        METHOD_ARRAY_INDEX, METHOD_INDEX, MINUS_ONE_POINTER, NIL_POINTER, ONE_POINTER,
-        RECEIVER_INDEX, SELECTOR_START, STACK_POINTER_INDEX, SUPERCLASS_INDEX, TEMP_FRAME_START,
-        TRUE_POINTER, TWO_POINTER, VALUE_INDEX, ZERO_POINTER,
+        CLASS_ARRAY_POINTER, CLASS_MESSAGE_POINTER, CLASS_METHOD_CONTEXT_POINTER,
+        DOES_NOT_UNDERSTAND_SELECTOR, FALSE_POINTER, HEADER_INDEX, HOME_INDEX,
+        INSTRUCTION_POINTER_INDEX, LITERAL_START, MESSAGE_ARGUMENTS_INDEX,
+        MESSAGE_DICTIONARY_INDEX, MESSAGE_SELECTOR_INDEX, MESSAGE_SIZE, METHOD_ARRAY_INDEX,
+        METHOD_INDEX, MINUS_ONE_POINTER, MUST_BE_BOOLEAN_SELECTOR, NIL_POINTER, ONE_POINTER,
+        RECEIVER_INDEX, SELECTOR_START, SENDER_INDEX, STACK_POINTER_INDEX, SUPERCLASS_INDEX,
+        TEMP_FRAME_START, TRUE_POINTER, TWO_POINTER, VALUE_INDEX, ZERO_POINTER,
     },
     objectmemory::ObjectMemory,
     oop::OOP,
@@ -1226,7 +1227,10 @@ impl Interpreter {
     //   newReceiver ← self stackValue: argumentCount.
     //   self sendSelectorToClass: (memory fetchClassOf: newReceiver)
     fn send_selector_argument_count(&mut self, selector: OOP, count: u8) {
-        todo!()
+        self.message_selector = selector;
+        self.argument_count = count;
+        let new_receiver = self.stack_value(self.argument_count as usize);
+        self.send_selector_to_class(OOP::from_raw(self.memory.fetch_class_of(new_receiver)));
     }
 
     /// Looks the current message up starting in a given class and runs what it finds.
@@ -1243,7 +1247,8 @@ impl Interpreter {
     //   self findNewMethodInClass: classPointer.
     //   self executeNewMethod
     fn send_selector_to_class(&mut self, class_pointer: OOP) {
-        todo!()
+        self.find_new_method_in_class(class_pointer);
+        self.execute_new_method();
     }
 
     /// Finds the method for message_selector in a class, consulting the method cache
@@ -1280,7 +1285,19 @@ impl Interpreter {
     // hash indexes an entry directly and the + 1 that Smalltalk's 1-relative Arrays
     // need falls away.
     fn find_new_method_in_class(&mut self, class: OOP) {
-        todo!()
+        let hash = ((self.message_selector.value & class.value) & 0xFF) as usize;
+        if self.method_cache[hash].selector == self.message_selector
+            && self.method_cache[hash].class == class
+        {
+            self.new_method = self.method_cache[hash].method;
+            self.primitive_index = self.method_cache[hash].primitive_index
+        } else {
+            self.lookup_method_in_class(class);
+            self.method_cache[hash].selector = self.message_selector;
+            self.method_cache[hash].class = class;
+            self.method_cache[hash].method = self.new_method;
+            self.method_cache[hash].primitive_index = self.primitive_index
+        }
     }
 
     /// Runs new_method, either as a primitive or by activating its bytecodes.
@@ -1291,7 +1308,9 @@ impl Interpreter {
     //   self primitiveResponse
     //     ifFalse: [self activateNewMethod]
     fn execute_new_method(&mut self) {
-        todo!()
+        if !self.primitive_response() {
+            self.activate_new_method();
+        }
     }
 
     /// Attempts to answer the current message with a primitive routine.
@@ -1306,7 +1325,7 @@ impl Interpreter {
     // Smalltalk body runs instead. Until chapter 29 exists this reports failure
     // unconditionally, which is correct for every method that has a fallback body.
     fn primitive_response(&mut self) -> bool {
-        false
+        false // TODO implement after/at chapter 29
     }
 
     /// Builds a MethodContext for new_method, moves the receiver and arguments into
@@ -1341,7 +1360,36 @@ impl Interpreter {
     //   self pop: argumentCount + 1.
     //   self newActiveContext: newContext
     fn activate_new_method(&mut self) {
-        todo!()
+        let context_size = if self.large_context_flag_of(self.new_method) {
+            32 + TEMP_FRAME_START
+        } else {
+            12 + TEMP_FRAME_START
+        };
+
+        // Diverging from the bluebook - using the helper function here, instead of doing it by hand again.
+        let new_context = self.instantiate_pointers(CLASS_METHOD_CONTEXT_POINTER, context_size);
+
+        self.memory
+            .store_pointer(SENDER_INDEX, new_context, self.active_context.value);
+        self.store_instruction_pointer_value_in_context(
+            self.initial_instruction_pointer_of_method(self.new_method) as i16,
+            new_context,
+        );
+        self.store_stack_pointer_value_in_context(
+            self.temporary_count_of(self.new_method) as i16,
+            new_context,
+        );
+        self.memory
+            .store_pointer(METHOD_INDEX, new_context, self.new_method.value);
+        self.transfer(
+            self.argument_count as u16 + 1,
+            (self.sp - self.argument_count as usize) as u16,
+            self.active_context,
+            RECEIVER_INDEX,
+            new_context,
+        );
+        self.pop(self.argument_count as usize + 1);
+        self.new_active_context(new_context);
     }
 
     /// Extracts the receiver-variable field index from the current bytecode and
@@ -1782,7 +1830,7 @@ impl Interpreter {
     //   self sendSelector: MustBeBooleanSelector argumentCount: 0
     fn send_must_be_boolean(&mut self) {
         // TODO: finish once send_selector is done.
-        todo!();
+        self.send_selector_argument_count(OOP::from_raw(MUST_BE_BOOLEAN_SELECTOR), 0);
     }
 
     /// Extracts the displacement from the current bytecode and jumps forward by
@@ -1986,6 +2034,13 @@ mod tests {
     const SELECTOR_TWO_OOP: u16 = 62;
     const SELECTOR_ABSENT_OOP: u16 = 86;
     const SELECTOR_COLLIDES_WITH_ONE_OOP: u16 = 98;
+
+    /// Hashes into the same method cache entry for both fixture classes. The
+    /// entry is (selector bitAnd: class) bitAnd: 16rFF, and 64 and 66 differ only
+    /// in bit 1, so a selector with that bit clear cannot tell them apart. Every
+    /// other fixture selector has it set, which would let a cache that ignored
+    /// the class go unnoticed.
+    const SELECTOR_SHARES_CACHE_ENTRY_OOP: u16 = 84;
 
     /// Selector slots per message dictionary. Must be a power of two: the probe
     /// reduces the hash modulo this by masking, which is only correct then.
@@ -3038,23 +3093,85 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not yet implemented")]
-    fn a_conditional_jump_on_a_non_boolean_reaches_must_be_boolean() {
-        // 32 push literal constant 0, a SmallInteger, then 152. Neither true nor
-        // false, so the value goes back on the stack as the receiver of a
-        // #mustBeBoolean send.
+    fn a_conditional_jump_on_a_non_boolean_sends_must_be_boolean() {
+        // 112 pushes the receiver, which is neither true nor false, then 152 is a
+        // conditional jump. The receiver goes back on the stack and becomes the
+        // receiver of a #mustBeBoolean send.
         //
-        // That send is still todo!(), which is what this asserts on. Once
-        // sendSelector:argumentCount: exists, replace the expectation with a
-        // real one: message_selector is MUST_BE_BOOLEAN_SELECTOR, argument_count
-        // is 0, and the un_pop has put the value back on the stack.
-        let mut interpreter = Fixture::new()
-            .literal(0, small_int(1))
-            .bytecodes(&[32, 152])
-            .build();
+        // The receiver is used rather than a literal SmallInteger because
+        // fetchClassOf answers ClassSmallIntegerPointer for one of those, and the
+        // fixture furnishes no such class. The receiver's class is the chain the
+        // fixture does build.
+        let mut fixture = Fixture::new();
+        fixture.bytecodes(&[112, 152]);
+        in_subclass(&mut fixture, MUST_BE_BOOLEAN_SELECTOR, METHOD_X_OOP);
+        let mut interpreter = fixture.build();
 
         interpreter.cycle();
         interpreter.cycle();
+
+        assert_eq!(
+            interpreter.message_selector,
+            OOP::from_raw(MUST_BE_BOOLEAN_SELECTOR)
+        );
+        assert_eq!(interpreter.argument_count, 0, "mustBeBoolean takes none");
+        assert_eq!(interpreter.new_method, OOP::from_raw(METHOD_X_OOP));
+    }
+
+    #[test]
+    fn the_must_be_boolean_send_activates_a_context_for_the_un_popped_value() {
+        let mut fixture = Fixture::new();
+        fixture.bytecodes(&[112, 152]);
+        in_subclass(&mut fixture, MUST_BE_BOOLEAN_SELECTOR, METHOD_X_OOP);
+        let mut interpreter = fixture.build();
+
+        interpreter.cycle();
+        interpreter.cycle();
+
+        let new_context = interpreter.active_context;
+        assert_ne!(
+            new_context,
+            OOP::from_raw(CONTEXT_OOP),
+            "the send should have entered a context of its own"
+        );
+        assert_eq!(
+            field_of(&interpreter, new_context.value, SENDER_INDEX),
+            OOP::from_raw(CONTEXT_OOP),
+            "the sending context is the new one's sender"
+        );
+        // The un_pop is what left the value where activateNewMethod could reach
+        // it. transfer moves it into the new context and nils the slot it came
+        // from, so an untouched stack slot would mean the value never moved.
+        assert_eq!(
+            field_of(&interpreter, new_context.value, RECEIVER_INDEX),
+            OOP::from_raw(RECEIVER_OOP)
+        );
+        assert_eq!(
+            field_of(&interpreter, CONTEXT_OOP, FIRST_STACK_FIELD),
+            OOP::from_raw(NIL_POINTER),
+            "the value should have been transferred out of the sending context"
+        );
+
+        // Method X has no literals and no temporaries, so the registers come out
+        // of its header rather than from whatever the sending context held.
+        assert_eq!(interpreter.method, OOP::from_raw(METHOD_X_OOP));
+        assert_eq!(interpreter.receiver, OOP::from_raw(RECEIVER_OOP));
+        assert_eq!(
+            interpreter.ip,
+            (LITERAL_START * 2) as usize,
+            "ip is the first bytecode of method X"
+        );
+        assert_eq!(
+            interpreter.sp,
+            (TEMP_FRAME_START - 1) as usize,
+            "method X has no temporaries, so its stack starts empty"
+        );
+        // Method X's header has the large context flag clear, so it gets the
+        // smaller of the only two sizes contexts are ever allocated at.
+        assert_eq!(
+            interpreter.memory.fetch_word_length_of(new_context),
+            12 + TEMP_FRAME_START
+        );
     }
 
     // ┌─────────────────────┐
@@ -3518,5 +3635,145 @@ mod tests {
         interpreter.argument_count = 0;
 
         interpreter.lookup_method_in_class(OOP::from_raw(SUBCLASS_OOP));
+    }
+
+    // ┌─────────────────────┐
+    // │        SENDS        │
+    // └─────────────────────┘
+
+    #[test]
+    fn a_repeated_send_is_answered_from_the_method_cache() {
+        let mut fixture = Fixture::new();
+        in_subclass(&mut fixture, SELECTOR_ONE_OOP, METHOD_X_OOP);
+        let mut interpreter = fixture.build();
+        interpreter.message_selector = OOP::from_raw(SELECTOR_ONE_OOP);
+
+        interpreter.find_new_method_in_class(OOP::from_raw(SUBCLASS_OOP));
+        assert_eq!(interpreter.new_method, OOP::from_raw(METHOD_X_OOP));
+        assert_eq!(interpreter.primitive_index, 0, "method X has no primitive");
+
+        // Repoint every method the dictionary can answer with at method Y, which
+        // carries a primitive index method X does not. A second lookup that still
+        // answers X can only have come from the cache, and one that answers Y
+        // went back to the dictionary.
+        for slot in 0..SELECTOR_SLOTS {
+            interpreter.memory.store_pointer(
+                slot,
+                OOP::from_raw(SUBCLASS_METHODS_OOP),
+                METHOD_Y_OOP,
+            );
+        }
+
+        // Both registers are cleared first, so that a hit has to put them back
+        // rather than the first lookup's values simply still being there.
+        interpreter.new_method = OOP::from_raw(NIL_POINTER);
+        interpreter.primitive_index = 99;
+
+        interpreter.find_new_method_in_class(OOP::from_raw(SUBCLASS_OOP));
+
+        assert_eq!(interpreter.new_method, OOP::from_raw(METHOD_X_OOP));
+        assert_eq!(
+            interpreter.primitive_index, 0,
+            "the cached primitive index comes back with the cached method"
+        );
+    }
+
+    #[test]
+    fn a_cached_entry_is_not_reused_for_a_different_class() {
+        // This selector puts both classes on the same cache entry, so the class
+        // half of the guard is the only thing keeping the second lookup honest.
+        let mut fixture = Fixture::new();
+        in_subclass(&mut fixture, SELECTOR_SHARES_CACHE_ENTRY_OOP, METHOD_X_OOP);
+        in_superclass(&mut fixture, SELECTOR_SHARES_CACHE_ENTRY_OOP, METHOD_Y_OOP);
+        let mut interpreter = fixture.build();
+        interpreter.message_selector = OOP::from_raw(SELECTOR_SHARES_CACHE_ENTRY_OOP);
+
+        interpreter.find_new_method_in_class(OOP::from_raw(SUBCLASS_OOP));
+        assert_eq!(interpreter.new_method, OOP::from_raw(METHOD_X_OOP));
+
+        interpreter.find_new_method_in_class(OOP::from_raw(SUPERCLASS_OOP));
+        assert_eq!(
+            interpreter.new_method,
+            OOP::from_raw(METHOD_Y_OOP),
+            "the entry belongs to the subclass, not to the selector alone"
+        );
+    }
+
+    #[test]
+    fn a_cached_entry_is_not_reused_for_a_different_selector() {
+        // The entry is (selector bitAnd: class) bitAnd: 16rFF, and the subclass
+        // has only bit 6 set, so every selector sharing that bit shares an entry
+        // with every other. 82 and 98 both do.
+        let mut fixture = Fixture::new();
+        in_subclass(&mut fixture, SELECTOR_ONE_OOP, METHOD_X_OOP);
+        in_subclass(&mut fixture, SELECTOR_COLLIDES_WITH_ONE_OOP, METHOD_Y_OOP);
+        let mut interpreter = fixture.build();
+
+        interpreter.message_selector = OOP::from_raw(SELECTOR_ONE_OOP);
+        interpreter.find_new_method_in_class(OOP::from_raw(SUBCLASS_OOP));
+        assert_eq!(interpreter.new_method, OOP::from_raw(METHOD_X_OOP));
+
+        interpreter.message_selector = OOP::from_raw(SELECTOR_COLLIDES_WITH_ONE_OOP);
+        interpreter.find_new_method_in_class(OOP::from_raw(SUBCLASS_OOP));
+        assert_eq!(
+            interpreter.new_method,
+            OOP::from_raw(METHOD_Y_OOP),
+            "the entry belongs to the selector, not to the class alone"
+        );
+    }
+
+    #[test]
+    fn a_send_moves_the_receiver_and_its_arguments_into_the_new_context() {
+        let mut fixture = Fixture::new();
+        in_subclass(&mut fixture, SELECTOR_ONE_OOP, METHOD_X_OOP);
+        let mut interpreter = fixture.build();
+
+        // The receiver sits underneath its argument, the way the compiler leaves
+        // them for a one argument send.
+        interpreter.push(OOP::from_raw(RECEIVER_OOP));
+        interpreter.push(OOP::from_raw(ASSOCIATION_OOP));
+
+        interpreter.send_selector_argument_count(OOP::from_raw(SELECTOR_ONE_OOP), 1);
+
+        let new_context = interpreter.active_context;
+        assert_ne!(new_context, OOP::from_raw(CONTEXT_OOP));
+        assert_eq!(
+            field_of(&interpreter, new_context.value, RECEIVER_INDEX),
+            OOP::from_raw(RECEIVER_OOP),
+            "the receiver is found underneath the arguments, not on top"
+        );
+        // Arguments are the first temporaries, so the single argument lands in
+        // the slot immediately after the receiver.
+        assert_eq!(
+            field_of(&interpreter, new_context.value, TEMP_FRAME_START),
+            OOP::from_raw(ASSOCIATION_OOP)
+        );
+    }
+
+    #[test]
+    fn a_send_leaves_the_sending_context_with_its_stack_emptied() {
+        let mut fixture = Fixture::new();
+        in_subclass(&mut fixture, SELECTOR_ONE_OOP, METHOD_X_OOP);
+        let mut interpreter = fixture.build();
+        interpreter.push(OOP::from_raw(RECEIVER_OOP));
+        interpreter.push(OOP::from_raw(ASSOCIATION_OOP));
+
+        interpreter.send_selector_argument_count(OOP::from_raw(SELECTOR_ONE_OOP), 1);
+
+        // transfer nils what it moves, and the sender is popped back to where it
+        // was before it pushed the receiver.
+        assert_eq!(
+            field_of(&interpreter, CONTEXT_OOP, FIRST_STACK_FIELD),
+            OOP::from_raw(NIL_POINTER)
+        );
+        assert_eq!(
+            field_of(&interpreter, CONTEXT_OOP, FIRST_STACK_FIELD + 1),
+            OOP::from_raw(NIL_POINTER)
+        );
+        assert_eq!(
+            field_of(&interpreter, CONTEXT_OOP, STACK_POINTER_INDEX),
+            small_int_oop(TEMP_COUNT),
+            "the stored sp is back to an empty stack"
+        );
     }
 }
