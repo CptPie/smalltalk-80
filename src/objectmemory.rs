@@ -1522,7 +1522,7 @@ impl ObjectMemory {
         self.class_bits_of_put(oop, class);
         self.pointer_bit_of_put(oop, true);
         for i in 0..length {
-            self.heap_chunk_of_word_put(oop, i, NIL_POINTER);
+            self.heap_chunk_of_word_put(oop, HEADER_SIZE + i, NIL_POINTER);
         }
         return Ok(oop);
     }
@@ -1556,7 +1556,7 @@ impl ObjectMemory {
         self.class_bits_of_put(oop, class);
 
         for i in 0..length {
-            self.heap_chunk_of_word_put(oop, i, 0x0000);
+            self.heap_chunk_of_word_put(oop, HEADER_SIZE + i, 0x0000);
         }
         return Ok(oop);
     }
@@ -1591,7 +1591,7 @@ impl ObjectMemory {
         self.odd_bit_of_put(oop, length % 2 == 1);
 
         for i in 0..length {
-            self.heap_chunk_of_byte_put(oop, i, 0x00);
+            self.heap_chunk_of_byte_put(oop, HEADER_SIZE * 2 + i, 0x00);
         }
         return Ok(oop);
     }
@@ -2018,6 +2018,12 @@ impl ObjectMemory {
 
     /// Fetch a free pointer and return a new 'fresh' object.
     ///
+    /// Object table entries are recycled, so the whole first word is cleared before
+    /// anything is written into it. That is what makes the entry fresh: the count,
+    /// odd and pointer bits all describe the previous tenant, and every one of them
+    /// would be read back as if it described the new object. The callers that care
+    /// about the odd and pointer bits set them afterwards.
+    ///
     /// # Parameters:
     ///     * size (u16): The size of the new object in words (including header)
     ///     * location (u16): The heap location for the new object
@@ -2040,6 +2046,7 @@ impl ObjectMemory {
     //
     fn obtain_pointer(&mut self, size: u16, location: u16) -> Result<OOP, ObjectMemoryError> {
         let oop = self.remove_from_free_pointer_list()?;
+        self.object_table[oop.value as usize] = 0;
         self.segment_bits_of_put(oop, self.current_segment);
         self.location_bits_of_put(oop, location);
         self.size_bits_of_put(oop, size);
@@ -2528,5 +2535,322 @@ mod allocator_tests {
         assert_eq!(memory.location_bits_of(OOP::from_raw(0)), base);
         // OOP 2 should be untouched (segment 1)
         assert_eq!(memory.location_bits_of(OOP::from_raw(2)), 100);
+    }
+}
+
+#[cfg(test)]
+mod instantiation_tests {
+    use crate::globalconstants::{BIG_SIZE, FIRST_FREE_CHUNK_LIST, NON_POINTER};
+
+    use super::*;
+
+    /// Where the one free chunk the fixture offers starts, chosen to clear the
+    /// free chunk list heads that occupy the bottom of every segment.
+    const CHUNK_LOCATION: u16 = 64;
+
+    /// Big enough for every allocation these tests make, several times over.
+    const CHUNK_SIZE: u16 = 200;
+
+    /// An arbitrary class pointer, distinctive enough to spot in a heap dump and
+    /// distinct from NilPointer so that a clobbered class field is visible.
+    const SOME_CLASS: u16 = 0x0042;
+
+    /// A memory holding one large free chunk and a supply of free object table
+    /// entries, which is the least an allocation needs in order to succeed.
+    fn allocatable_memory() -> ObjectMemory {
+        let mut mem = ObjectMemory {
+            heap: Heap::new(),
+            object_table: vec![0u16; 64],
+            free_pointer_list: NON_POINTER,
+            current_segment: 0,
+            last_segment: 0,
+            limit_in_last_page: 0,
+        };
+
+        // An all zero object table otherwise reads as a segment full of live
+        // objects at location 0, which compaction would try to slide around.
+        for oop in (0..64).step_by(2) {
+            mem.free_bit_of_put(OOP::from_raw(oop as u16), true);
+        }
+
+        for i in 0..=(BIG_SIZE as usize) {
+            mem.heap[0][(FIRST_FREE_CHUNK_LIST as usize) + i] = NON_POINTER;
+        }
+        mem.to_free_chunk_list_add(0, CHUNK_SIZE, CHUNK_LOCATION);
+
+        // Entries below 16 are where a real image keeps its well known pointers,
+        // so hand out object table entries from above them.
+        for oop in (16..64).step_by(2) {
+            mem.to_free_pointer_list_add(OOP::from_raw(oop as u16));
+        }
+
+        return mem;
+    }
+
+    // ┌──────────────────────────────────────────────┐
+    // │   instantiate_class_with_pointers tests      │
+    // └──────────────────────────────────────────────┘
+
+    #[test]
+    fn instantiate_with_pointers_reports_the_class_and_length_it_was_given() {
+        let mut memory = allocatable_memory();
+
+        let oop = memory
+            .instantiate_class_with_pointers(SOME_CLASS, 8)
+            .expect("fixture should have room for an eight field object");
+
+        assert_eq!(memory.fetch_class_of(oop), SOME_CLASS);
+        assert_eq!(memory.fetch_word_length_of(oop), 8);
+        assert!(memory.pointer_bit_of(oop));
+    }
+
+    #[test]
+    fn instantiate_with_pointers_nils_every_field() {
+        let mut memory = allocatable_memory();
+
+        let oop = memory
+            .instantiate_class_with_pointers(SOME_CLASS, 8)
+            .unwrap();
+
+        for field in 0..8 {
+            assert_eq!(
+                memory.fetch_pointer(field, oop),
+                NIL_POINTER,
+                "field {field} was not initialized to nil"
+            );
+        }
+    }
+
+    #[test]
+    fn instantiate_with_pointers_leaves_no_gap_between_the_header_and_the_fields() {
+        let mut memory = allocatable_memory();
+
+        let oop = memory
+            .instantiate_class_with_pointers(SOME_CLASS, 4)
+            .unwrap();
+
+        // The size and class words are the two the field loop used to run over,
+        // so read them straight out of the chunk rather than through the accessors
+        // that would paper over the difference.
+        let location = memory.location_bits_of(oop) as usize;
+        assert_eq!(memory.heap[0][location], HEADER_SIZE + 4);
+        assert_eq!(memory.heap[0][location + 1], SOME_CLASS);
+    }
+
+    #[test]
+    fn instantiate_with_pointers_handles_an_object_with_no_fields() {
+        let mut memory = allocatable_memory();
+
+        let oop = memory
+            .instantiate_class_with_pointers(SOME_CLASS, 0)
+            .unwrap();
+
+        assert_eq!(memory.fetch_class_of(oop), SOME_CLASS);
+        assert_eq!(memory.fetch_word_length_of(oop), 0);
+    }
+
+    #[test]
+    fn two_instantiations_do_not_overlap() {
+        let mut memory = allocatable_memory();
+
+        let first = memory
+            .instantiate_class_with_pointers(SOME_CLASS, 6)
+            .unwrap();
+        memory.store_pointer(0, first, 0x0007); // a SmallInteger, so no ref counting
+        let second = memory
+            .instantiate_class_with_pointers(SOME_CLASS, 6)
+            .unwrap();
+
+        assert_ne!(first, second);
+        assert_ne!(
+            memory.location_bits_of(first),
+            memory.location_bits_of(second)
+        );
+
+        // The second allocation must not have landed on top of the first.
+        assert_eq!(memory.fetch_pointer(0, first), 0x0007);
+        assert_eq!(memory.fetch_class_of(first), SOME_CLASS);
+        assert_eq!(memory.fetch_word_length_of(first), 6);
+    }
+
+    // ┌──────────────────────────────────────────────┐
+    // │     instantiate_class_with_words tests       │
+    // └──────────────────────────────────────────────┘
+
+    #[test]
+    fn instantiate_with_words_reports_the_class_and_length_it_was_given() {
+        let mut memory = allocatable_memory();
+
+        let oop = memory.instantiate_class_with_words(SOME_CLASS, 8).unwrap();
+
+        assert_eq!(memory.fetch_class_of(oop), SOME_CLASS);
+        assert_eq!(memory.fetch_word_length_of(oop), 8);
+    }
+
+    #[test]
+    fn instantiate_with_words_zeroes_every_field() {
+        let mut memory = allocatable_memory();
+
+        let oop = memory.instantiate_class_with_words(SOME_CLASS, 8).unwrap();
+
+        for word in 0..8 {
+            assert_eq!(
+                memory.fetch_word(word, oop),
+                0x0000,
+                "word {word} was not initialized to zero"
+            );
+        }
+    }
+
+    #[test]
+    fn instantiate_with_words_leaves_the_header_words_alone() {
+        let mut memory = allocatable_memory();
+
+        let oop = memory.instantiate_class_with_words(SOME_CLASS, 4).unwrap();
+
+        let location = memory.location_bits_of(oop) as usize;
+        assert_eq!(memory.heap[0][location], HEADER_SIZE + 4);
+        assert_eq!(memory.heap[0][location + 1], SOME_CLASS);
+    }
+
+    // ┌──────────────────────────────────────────────┐
+    // │     recycled object table entry tests        │
+    // └──────────────────────────────────────────────┘
+
+    /// Puts an object table entry back on the free list with every bit of its
+    /// first word set, standing in for whatever the previous tenant left behind.
+    fn free_a_dirty_entry(memory: &mut ObjectMemory, oop: OOP) {
+        memory.object_table[oop.value as usize] = 0xFFFF;
+        memory.free_pointer_list = NON_POINTER;
+        memory.to_free_pointer_list_add(oop);
+    }
+
+    #[test]
+    fn obtain_pointer_clears_the_previous_tenants_first_word() {
+        let mut memory = allocatable_memory();
+        let recycled = OOP::from_raw(16);
+        free_a_dirty_entry(&mut memory, recycled);
+
+        let oop = memory.obtain_pointer(6, CHUNK_LOCATION).unwrap();
+
+        assert_eq!(oop, recycled);
+        assert_eq!(memory.count_bits_of(oop), 0);
+        assert!(!memory.odd_bit_of(oop));
+        assert!(!memory.pointer_bit_of(oop));
+        assert!(!memory.free_bit_of(oop));
+        // The fields it is supposed to set still survive the clearing.
+        assert_eq!(memory.size_bits_of(oop), 6);
+        assert_eq!(memory.location_bits_of(oop), CHUNK_LOCATION);
+    }
+
+    #[test]
+    fn a_recycled_entry_does_not_start_with_a_reference_count() {
+        let mut memory = allocatable_memory();
+        let recycled = OOP::from_raw(16);
+        free_a_dirty_entry(&mut memory, recycled);
+
+        let oop = memory
+            .instantiate_class_with_pointers(SOME_CLASS, 4)
+            .unwrap();
+
+        assert_eq!(oop, recycled);
+        // A count inherited from the previous tenant would mean this object can
+        // never reach zero and so can never be deallocated.
+        assert_eq!(memory.count_bits_of(oop), 0);
+    }
+
+    #[test]
+    fn a_word_object_in_a_recycled_entry_is_not_marked_as_holding_pointers() {
+        let mut memory = allocatable_memory();
+        let recycled = OOP::from_raw(16);
+        free_a_dirty_entry(&mut memory, recycled);
+
+        let oop = memory.instantiate_class_with_words(SOME_CLASS, 4).unwrap();
+
+        assert_eq!(oop, recycled);
+        // decrease_references_to walks an object's words as OOPs when this bit is
+        // set, so a stale one would send it through raw word data.
+        assert!(!memory.pointer_bit_of(oop));
+    }
+
+    #[test]
+    fn a_byte_object_in_a_recycled_entry_is_not_marked_as_holding_pointers() {
+        let mut memory = allocatable_memory();
+        let recycled = OOP::from_raw(16);
+        free_a_dirty_entry(&mut memory, recycled);
+
+        let oop = memory.instantiate_class_with_bytes(SOME_CLASS, 8).unwrap();
+
+        assert_eq!(oop, recycled);
+        assert!(!memory.pointer_bit_of(oop));
+    }
+
+    #[test]
+    fn an_even_byte_object_in_a_recycled_entry_does_not_inherit_the_odd_bit() {
+        let mut memory = allocatable_memory();
+        let recycled = OOP::from_raw(16);
+        free_a_dirty_entry(&mut memory, recycled);
+
+        let oop = memory.instantiate_class_with_bytes(SOME_CLASS, 8).unwrap();
+
+        assert_eq!(oop, recycled);
+        assert!(!memory.odd_bit_of(oop));
+        // A stale odd bit would make this object report seven bytes, not eight.
+        assert_eq!(memory.fetch_byte_length_of(oop), 8);
+    }
+
+    // ┌──────────────────────────────────────────────┐
+    // │     instantiate_class_with_bytes tests       │
+    // └──────────────────────────────────────────────┘
+
+    #[test]
+    fn instantiate_with_bytes_reports_the_class_and_length_it_was_given() {
+        let mut memory = allocatable_memory();
+
+        let oop = memory.instantiate_class_with_bytes(SOME_CLASS, 8).unwrap();
+
+        assert_eq!(memory.fetch_class_of(oop), SOME_CLASS);
+        assert_eq!(memory.fetch_byte_length_of(oop), 8);
+        assert!(!memory.odd_bit_of(oop));
+    }
+
+    #[test]
+    fn instantiate_with_bytes_rounds_an_odd_length_up_and_records_it() {
+        let mut memory = allocatable_memory();
+
+        let oop = memory.instantiate_class_with_bytes(SOME_CLASS, 5).unwrap();
+
+        assert_eq!(memory.fetch_class_of(oop), SOME_CLASS);
+        // Five bytes occupy three words, and the odd bit is what tells the
+        // difference between five bytes and six.
+        assert_eq!(memory.fetch_word_length_of(oop), 3);
+        assert!(memory.odd_bit_of(oop));
+        assert_eq!(memory.fetch_byte_length_of(oop), 5);
+    }
+
+    #[test]
+    fn instantiate_with_bytes_zeroes_every_byte() {
+        let mut memory = allocatable_memory();
+
+        let oop = memory.instantiate_class_with_bytes(SOME_CLASS, 7).unwrap();
+
+        for byte in 0..7 {
+            assert_eq!(
+                memory.fetch_byte(byte, oop),
+                0x00,
+                "byte {byte} was not initialized to zero"
+            );
+        }
+    }
+
+    #[test]
+    fn instantiate_with_bytes_leaves_the_header_words_alone() {
+        let mut memory = allocatable_memory();
+
+        let oop = memory.instantiate_class_with_bytes(SOME_CLASS, 6).unwrap();
+
+        let location = memory.location_bits_of(oop) as usize;
+        assert_eq!(memory.heap[0][location], HEADER_SIZE + 3);
+        assert_eq!(memory.heap[0][location + 1], SOME_CLASS);
     }
 }
