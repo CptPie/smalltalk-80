@@ -1,8 +1,8 @@
 use crate::{
     globalconstants::{
-        CLASS_ARRAY_POINTER, CLASS_MESSAGE_POINTER, CLASS_METHOD_CONTEXT_POINTER,
-        DOES_NOT_UNDERSTAND_SELECTOR, FALSE_POINTER, HEADER_INDEX, HOME_INDEX,
-        INSTRUCTION_POINTER_INDEX, LITERAL_START, MESSAGE_ARGUMENTS_INDEX,
+        CANNOT_RETURN_SELECTOR, CLASS_ARRAY_POINTER, CLASS_MESSAGE_POINTER,
+        CLASS_METHOD_CONTEXT_POINTER, DOES_NOT_UNDERSTAND_SELECTOR, FALSE_POINTER, HEADER_INDEX,
+        HOME_INDEX, INSTRUCTION_POINTER_INDEX, LITERAL_START, MESSAGE_ARGUMENTS_INDEX,
         MESSAGE_DICTIONARY_INDEX, MESSAGE_SELECTOR_INDEX, MESSAGE_SIZE, METHOD_ARRAY_INDEX,
         METHOD_INDEX, MINUS_ONE_POINTER, MUST_BE_BOOLEAN_SELECTOR, NIL_POINTER, ONE_POINTER,
         RECEIVER_INDEX, SELECTOR_START, SENDER_INDEX, SPECIAL_SELECTORS_ARRAY_POINTER,
@@ -224,7 +224,22 @@ impl Interpreter {
     //   currentBytecode = 124 ifTrue: [↑self returnValue: self popStack to: self sender].
     //   currentBytecode = 125 ifTrue: [↑self returnValue: self popStack to: self caller]
     fn return_bytecode(&mut self) {
-        todo!()
+        match self.current_bytecode {
+            120 => self.return_value_to(self.receiver, self.sender()),
+            121 => self.return_value_to(OOP::from_raw(TRUE_POINTER), self.sender()),
+            122 => self.return_value_to(OOP::from_raw(FALSE_POINTER), self.sender()),
+            123 => self.return_value_to(OOP::from_raw(NIL_POINTER), self.sender()),
+            124 => {
+                let stack_top = self.pop_stack();
+                self.return_value_to(stack_top, self.sender())
+            }
+            125 => {
+                let stack_top = self.pop_stack();
+                self.return_value_to(stack_top, self.caller())
+            }
+            126..=127 => self.vm_panic(&format!("unused bytecode {}", self.current_bytecode)),
+            _ => unreachable!("{} is not a return bytecode", self.current_bytecode),
+        }
     }
 
     /// Second-level dispatch for the send bytecodes: extended sends, special-selector
@@ -450,6 +465,41 @@ impl Interpreter {
         self.active_context = a_context;
         self.memory.increase_references_to(self.active_context);
         self.fetch_context_registers();
+    }
+
+    /// The context a method return goes back to.
+    ///
+    /// Read from the home context, so that an explicit return from inside a block
+    /// returns out of the method enclosing the block rather than out of the block.
+    ///
+    /// # Returns:
+    ///     * OOP, the home context's sender
+    //
+    // see Bluebook p. 585
+    //
+    // sender
+    //   ↑memory fetchPointer: SenderIndex
+    //           ofObject: homeContext
+    fn sender(&self) -> OOP {
+        OOP::from_raw(self.memory.fetch_pointer(SENDER_INDEX, self.home_context))
+    }
+
+    /// The context a block return goes back to.
+    ///
+    /// The same field as sender, read from the active context instead, which is
+    /// the only thing that separates the two. For a MethodContext the active and
+    /// home contexts are the same object and so are these.
+    ///
+    /// # Returns:
+    ///     * OOP, the active context's sender
+    //
+    // see Bluebook p. 586
+    //
+    // caller
+    //   ↑memory fetchPointer: SenderIndex
+    //           ofObject: activeContext
+    fn caller(&self) -> OOP {
+        OOP::from_raw(self.memory.fetch_pointer(SENDER_INDEX, self.active_context))
     }
 
     /// Determines whether a context is a BlockContext or a MethodContext.
@@ -2065,6 +2115,128 @@ impl Interpreter {
     fn special_selector_primitive_response(&mut self) -> bool {
         false // TODO implement after/with chapter 29
     }
+
+    /// Returns a value from the active context and resumes the one underneath it.
+    ///
+    /// Three things can go wrong, and all three are Smalltalk level failures
+    /// rather than interpreter errors, because contexts are ordinary objects a
+    /// program can hold onto and manipulate:
+    ///
+    /// A nil target means there is nothing underneath to return to. A target
+    /// whose instruction pointer is nil has already been returned from, and
+    /// returning into it twice would resume a dead frame. Both send
+    /// #cannotReturn with the context and the result as its arguments.
+    ///
+    /// The third is not an error but a lifetime problem. The returning context
+    /// may hold the only reference to the value it is returning, and leaving that
+    /// context drops its reference count, which frees it and recursively releases
+    /// everything it pointed at, the result included. Counting the result up
+    /// across the switch is what keeps it alive long enough to be pushed.
+    ///
+    /// # Parameters:
+    ///     * result_pointer (OOP): The value to return
+    ///     * context_pointer (OOP): The context to resume
+    //
+    // see Bluebook p. 609
+    //
+    // returnValue: resultPointer to: contextPointer
+    //   | sendersIP |
+    //   contextPointer=NilPointer
+    //     ifTrue: [self push: activeContext.
+    //              self push: resultPointer.
+    //              ↑self sendSelector: CannotReturnSelector
+    //                    argumentCount: 1].
+    //   sendersIP ← memory fetchPointer: InstructionPointerIndex
+    //                      ofObject: contextPointer.
+    //   sendersIP=NilPointer
+    //     ifTrue: [self push: activeContext.
+    //              self push: resultPointer.
+    //              ↑self sendSelector: CannotReturnSelector
+    //                    argumentCount: 1].
+    //   memory increaseReferencesTo: resultPointer.
+    //   self returnToActiveContext: contextPointer.
+    //   self push: resultPointer.
+    //   memory decreaseReferencesTo: resultPointer
+    //
+    // The book first gives the obvious version and then discards it, because it
+    // handles none of the three cases above:
+    //
+    // simpleReturnValue: resultPointer to: contextPointer
+    //   self newActiveContext: contextPointer.
+    //   self push: resultPointer
+    fn return_value_to(&mut self, result_pointer: OOP, context_pointer: OOP) {
+        if context_pointer.value == NIL_POINTER {
+            self.push(self.active_context);
+            self.push(result_pointer);
+            return self.send_selector_argument_count(OOP::from_raw(CANNOT_RETURN_SELECTOR), 1);
+        }
+
+        // eliminating sendersIP since the variable is only used for the check anyways. This looks
+        // ugly but beats a unused variable.
+        if self
+            .memory
+            .fetch_pointer(INSTRUCTION_POINTER_INDEX, context_pointer)
+            == NIL_POINTER
+        {
+            self.push(self.active_context);
+            self.push(result_pointer);
+            return self.send_selector_argument_count(OOP::from_raw(CANNOT_RETURN_SELECTOR), 1);
+        }
+
+        self.memory.increase_references_to(result_pointer);
+        self.return_to_active_context(context_pointer);
+        self.push(result_pointer);
+        self.memory.decrease_references_to(result_pointer);
+    }
+
+    /// Resumes a context that was suspended by a send, marking the one being left
+    /// as returned from.
+    ///
+    /// The same switch newActiveContext: performs, except that the departing
+    /// context's registers are discarded rather than written back: it will never
+    /// run again, and nilling its fields is what lets a later return into it be
+    /// recognised as a return into a dead context.
+    ///
+    /// # Parameters:
+    ///     * a_context (OOP): The context to resume
+    //
+    // see Bluebook p. 610
+    //
+    // returnToActiveContext: aContext
+    //   memory increaseReferencesTo: aContext.
+    //   self nilContextFields.
+    //   memory decreaseReferencesTo: activeContext.
+    //   activeContext ← aContext.
+    //   self fetchContextRegisters
+    fn return_to_active_context(&mut self, a_context: OOP) {
+        self.memory.increase_references_to(a_context);
+        self.nil_context_fields();
+        self.memory.decrease_references_to(self.active_context);
+        self.active_context = a_context;
+        self.fetch_context_registers();
+    }
+
+    /// Marks the active context as returned from, by nilling the two fields that
+    /// say where it came from and where it was up to.
+    ///
+    /// The nil instruction pointer is what returnValue:to: looks for when it
+    /// checks whether a context has already been returned from.
+    //
+    // see Bluebook p. 610
+    //
+    // nilContextFields
+    //   memory storePointer: SenderIndex
+    //          ofObject: activeContext
+    //          withValue: NilPointer.
+    //   memory storePointer: InstructionPointerIndex
+    //          ofObject: activeContext
+    //          withValue: NilPointer
+    fn nil_context_fields(&mut self) {
+        self.memory
+            .store_pointer(SENDER_INDEX, self.active_context, NIL_POINTER);
+        self.memory
+            .store_pointer(INSTRUCTION_POINTER_INDEX, self.active_context, NIL_POINTER);
+    }
 }
 
 #[cfg(test)]
@@ -2221,6 +2393,9 @@ mod tests {
     const ROOT_METHODS_OOP: u16 = 92;
     const METHOD_Z_OOP: u16 = 94;
 
+    /// The context underneath the active one. Returns go back to this.
+    const SENDER_CONTEXT_OOP: u16 = 96;
+
     // Selector OOPs are only ever compared and hashed, never dereferenced, so
     // what matters is their numeric value. hash is the pointer shifted right one
     // and the slot is (mask & hash) + SelectorStart, so with eight slots 82 and
@@ -2293,6 +2468,7 @@ mod tests {
     const ROOT_DICTIONARY_LOCATION: u16 = 690;
     const ROOT_METHODS_LOCATION: u16 = 710;
     const METHOD_Z_LOCATION: u16 = 730;
+    const SENDER_CONTEXT_LOCATION: u16 = 750;
 
     /// A single free chunk covering the tail of the segment, so that the object
     /// memory has somewhere to allocate from. Large enough to land on the big
@@ -2315,6 +2491,11 @@ mod tests {
     /// The interpreter's sp when the evaluation stack is empty: one below the
     /// first stack slot, because push pre-increments.
     const EMPTY_STACK_SP: usize = (FIRST_STACK_FIELD - 1) as usize;
+
+    /// Where the sender context resumes once a return puts it back in charge.
+    /// Deliberately not where the active context starts, so that a register left
+    /// over from the returning context is visible.
+    const SENDER_RESUME_BYTE: u16 = FIRST_BYTECODE_BYTE + 4;
 
     /// An object table entry for a live pointer object in segment 0.
     ///
@@ -2375,6 +2556,13 @@ mod tests {
                 1 + LITERAL_COUNT + BYTECODE_WORDS,
             );
             Self::place(&mut ot, &mut seg, ASSOCIATION_OOP, ASSOCIATION_LOCATION, 2);
+            Self::place(
+                &mut ot,
+                &mut seg,
+                SENDER_CONTEXT_OOP,
+                SENDER_CONTEXT_LOCATION,
+                FIRST_STACK_FIELD + STACK_SLOTS,
+            );
 
             // The Array the special selector bytecodes read their selector and
             // argument count out of. Shared by every CompiledMethod in a real
@@ -2538,6 +2726,23 @@ mod tests {
             seg[context + METHOD_INDEX as usize] = METHOD_OOP;
             seg[context + RECEIVER_INDEX as usize] = RECEIVER_OOP;
 
+            // The context a return goes back to. Not linked in by default: an
+            // active context with no sender is what the cannotReturn guard needs,
+            // and sender_context wires it up for the tests that want one. Its
+            // receiver differs from the active context's, so a return that failed
+            // to reload the registers would be caught.
+            let sender_context = (SENDER_CONTEXT_LOCATION + HEADER_SIZE) as usize;
+            seg[sender_context + SENDER_INDEX as usize] = NIL_POINTER;
+            seg[sender_context + INSTRUCTION_POINTER_INDEX as usize] =
+                small_int(SENDER_RESUME_BYTE + 1);
+            seg[sender_context + STACK_POINTER_INDEX as usize] = small_int(TEMP_COUNT);
+            seg[sender_context + METHOD_INDEX as usize] = METHOD_OOP;
+            seg[sender_context + RECEIVER_INDEX as usize] = ASSOCIATION_OOP;
+
+            // The active context needs a class of its own: cannotReturn is sent to
+            // it, so the lookup starts at whatever fetchClassOf answers here.
+            seg[(CONTEXT_LOCATION + 1) as usize] = SUBCLASS_OOP;
+
             // The method header. Nothing decodes it yet, but the literal count
             // occupies bits 1..6 of the SmallInteger, so this is the real header
             // for a method with LITERAL_COUNT literals, no temporaries, flag 0.
@@ -2602,6 +2807,29 @@ mod tests {
         fn method_class(&mut self, class: u16) -> &mut Self {
             self.literal(LITERAL_COUNT - 1, ASSOCIATION_OOP);
             self.association_value(class)
+        }
+
+        /// Puts a context underneath the active one for a return to go back to.
+        fn sender_context(&mut self) -> &mut Self {
+            self.seg[(CONTEXT_LOCATION + HEADER_SIZE + SENDER_INDEX) as usize] = SENDER_CONTEXT_OOP;
+            self
+        }
+
+        /// Nils the sender context's instruction pointer, which is how a context
+        /// that has already been returned from is marked.
+        fn sender_context_already_returned_from(&mut self) -> &mut Self {
+            self.sender_context();
+            self.seg
+                [(SENDER_CONTEXT_LOCATION + HEADER_SIZE + INSTRUCTION_POINTER_INDEX) as usize] =
+                NIL_POINTER;
+            self
+        }
+
+        /// Overrides an object's reference count, for the tests that need an
+        /// object to actually reach zero and be deallocated.
+        fn reference_count(&mut self, oop: u16, count: u8) -> &mut Self {
+            self.ot[oop as usize] = ((count as u16) << 8) | (self.ot[oop as usize] & 0x00FF);
+            self
         }
 
         /// Fills one entry of the special selector Array: the selector in the
@@ -4276,5 +4504,251 @@ mod tests {
             "the count comes from the slot after the selector"
         );
         assert_eq!(interpreter.new_method, OOP::from_raw(METHOD_X_OOP));
+    }
+
+    // ┌─────────────────────┐
+    // │       RETURNS       │
+    // └─────────────────────┘
+
+    /// A value with no other name in the fixture, so that a return carrying it
+    /// cannot be confused with a return of the receiver or of a constant.
+    const RETURNED_VALUE: u16 = 37;
+
+    #[test]
+    fn the_constant_returns_each_carry_their_own_value() {
+        for (bytecode, expected) in [
+            (120u8, RECEIVER_OOP),
+            (121, TRUE_POINTER),
+            (122, FALSE_POINTER),
+            (123, NIL_POINTER),
+        ] {
+            let mut interpreter = Fixture::new()
+                .sender_context()
+                .bytecodes(&[bytecode])
+                .build();
+
+            interpreter.cycle();
+
+            assert_eq!(
+                interpreter.active_context,
+                OOP::from_raw(SENDER_CONTEXT_OOP),
+                "bytecode {bytecode} should have resumed the sender"
+            );
+            assert_eq!(
+                interpreter.stack_top(),
+                OOP::from_raw(expected),
+                "bytecode {bytecode} returns the wrong value"
+            );
+        }
+    }
+
+    #[test]
+    fn return_top_of_stack_returns_what_was_pushed() {
+        // 32 pushes literal 0, then 124 returns it.
+        let mut interpreter = Fixture::new()
+            .sender_context()
+            .literal(0, small_int(RETURNED_VALUE))
+            .bytecodes(&[32, 124])
+            .build();
+
+        interpreter.cycle();
+        interpreter.cycle();
+
+        assert_eq!(
+            interpreter.active_context,
+            OOP::from_raw(SENDER_CONTEXT_OOP)
+        );
+        assert_eq!(interpreter.stack_top(), small_int_oop(RETURNED_VALUE));
+    }
+
+    #[test]
+    fn return_top_of_stack_to_caller_returns_what_was_pushed() {
+        // 125 returns to the caller rather than the sender. For a MethodContext
+        // the two are the same field of the same object, so this can only differ
+        // once BlockContexts exist.
+        let mut interpreter = Fixture::new()
+            .sender_context()
+            .literal(0, small_int(RETURNED_VALUE))
+            .bytecodes(&[32, 125])
+            .build();
+
+        interpreter.cycle();
+        interpreter.cycle();
+
+        assert_eq!(
+            interpreter.active_context,
+            OOP::from_raw(SENDER_CONTEXT_OOP)
+        );
+        assert_eq!(interpreter.stack_top(), small_int_oop(RETURNED_VALUE));
+    }
+
+    #[test]
+    fn a_return_reloads_the_registers_from_the_context_it_resumes() {
+        let mut interpreter = Fixture::new().sender_context().bytecodes(&[123]).build();
+
+        interpreter.cycle();
+
+        // The sender's receiver differs from the returning context's, so a
+        // register left over from before the return would show up here.
+        assert_eq!(interpreter.receiver, OOP::from_raw(ASSOCIATION_OOP));
+        assert_eq!(
+            interpreter.home_context,
+            OOP::from_raw(SENDER_CONTEXT_OOP),
+            "a MethodContext is its own home"
+        );
+        assert_eq!(
+            interpreter.ip, SENDER_RESUME_BYTE as usize,
+            "execution resumes where the sender left off"
+        );
+        // The sender's stack was empty and the returned value has just been
+        // pushed onto it.
+        assert_eq!(interpreter.sp, FIRST_STACK_FIELD as usize);
+        assert_eq!(
+            field_of(&interpreter, SENDER_CONTEXT_OOP, FIRST_STACK_FIELD),
+            OOP::from_raw(NIL_POINTER),
+            "the returned nil landed on the sender's stack"
+        );
+    }
+
+    #[test]
+    fn a_returned_from_context_is_marked_dead() {
+        let mut interpreter = Fixture::new().sender_context().bytecodes(&[121]).build();
+
+        interpreter.cycle();
+
+        // Nilling these is what lets a later return into this context be
+        // recognised as a return into a frame that has already finished.
+        assert_eq!(
+            field_of(&interpreter, CONTEXT_OOP, SENDER_INDEX),
+            OOP::from_raw(NIL_POINTER)
+        );
+        assert_eq!(
+            field_of(&interpreter, CONTEXT_OOP, INSTRUCTION_POINTER_INDEX),
+            OOP::from_raw(NIL_POINTER)
+        );
+    }
+
+    /// A fixture whose receiver class answers #cannotReturn, for the two guards.
+    fn cannot_return_fixture(fixture: &mut Fixture) -> Interpreter {
+        in_subclass(fixture, CANNOT_RETURN_SELECTOR, METHOD_X_OOP);
+        fixture.build()
+    }
+
+    #[test]
+    fn returning_with_no_sender_sends_cannot_return() {
+        // The fixture leaves the active context's sender nil unless asked, so
+        // this one has nothing underneath it to go back to.
+        let mut interpreter = cannot_return_fixture(Fixture::new().bytecodes(&[121]));
+
+        interpreter.cycle();
+
+        assert_eq!(
+            interpreter.message_selector,
+            OOP::from_raw(CANNOT_RETURN_SELECTOR)
+        );
+        assert_eq!(interpreter.argument_count, 1);
+        assert_eq!(interpreter.new_method, OOP::from_raw(METHOD_X_OOP));
+    }
+
+    #[test]
+    fn cannot_return_is_sent_the_context_and_the_result() {
+        let mut interpreter = cannot_return_fixture(Fixture::new().bytecodes(&[121]));
+
+        interpreter.cycle();
+
+        // The context is the receiver and the result its single argument, which
+        // is the pair a Smalltalk level handler needs to report the failure.
+        let new_context = interpreter.active_context;
+        assert_eq!(
+            field_of(&interpreter, new_context.value, RECEIVER_INDEX),
+            OOP::from_raw(CONTEXT_OOP)
+        );
+        assert_eq!(
+            field_of(&interpreter, new_context.value, TEMP_FRAME_START),
+            OOP::from_raw(TRUE_POINTER)
+        );
+    }
+
+    #[test]
+    fn returning_into_a_dead_context_sends_cannot_return() {
+        // The sender is linked in, but its instruction pointer is nil, which
+        // means it has already been returned from once.
+        let mut interpreter = cannot_return_fixture(
+            Fixture::new()
+                .sender_context_already_returned_from()
+                .bytecodes(&[121]),
+        );
+
+        interpreter.cycle();
+
+        assert_eq!(
+            interpreter.message_selector,
+            OOP::from_raw(CANNOT_RETURN_SELECTOR)
+        );
+        assert_eq!(interpreter.argument_count, 1);
+        assert_ne!(
+            interpreter.active_context,
+            OOP::from_raw(SENDER_CONTEXT_OOP),
+            "the dead context must not have been resumed"
+        );
+    }
+
+    #[test]
+    fn a_returned_value_survives_the_context_that_held_it() {
+        // The returning context holds the only reference to the value it is
+        // returning, and is itself referenced only once. Leaving it drops its
+        // count to zero, which deallocates it and releases everything it points
+        // at, the result included, unless the result is counted up across the
+        // switch.
+        let mut fixture = Fixture::new();
+        fixture
+            .sender_context()
+            .literal(0, ASSOCIATION_OOP)
+            .bytecodes(&[32, 124])
+            .reference_count(CONTEXT_OOP, 1)
+            .reference_count(ASSOCIATION_OOP, 0);
+        let mut interpreter = fixture.build();
+
+        interpreter.cycle(); // push the association, counting it up to one
+        interpreter.cycle(); // return it, which frees the context holding it
+
+        assert!(
+            interpreter.memory.is_free_oop(OOP::from_raw(CONTEXT_OOP)),
+            "the premise: leaving the context really does deallocate it"
+        );
+        assert!(
+            !interpreter
+                .memory
+                .is_free_oop(OOP::from_raw(ASSOCIATION_OOP)),
+            "the returned value was deallocated on its way out"
+        );
+        assert_eq!(interpreter.stack_top(), OOP::from_raw(ASSOCIATION_OOP));
+    }
+
+    #[test]
+    fn the_resumed_context_survives_the_one_that_pointed_at_it() {
+        // The returning context's sender field is the only reference to the
+        // context underneath it. Nilling that field on the way out counts the
+        // sender down, and would free it before it could be resumed, unless it
+        // is counted up first.
+        let mut interpreter = Fixture::new()
+            .sender_context()
+            .reference_count(SENDER_CONTEXT_OOP, 1)
+            .bytecodes(&[121])
+            .build();
+
+        interpreter.cycle();
+
+        assert!(
+            !interpreter
+                .memory
+                .is_free_oop(OOP::from_raw(SENDER_CONTEXT_OOP)),
+            "the context being resumed was deallocated on the way in"
+        );
+        assert_eq!(
+            interpreter.active_context,
+            OOP::from_raw(SENDER_CONTEXT_OOP)
+        );
+        assert_eq!(interpreter.stack_top(), OOP::from_raw(TRUE_POINTER));
     }
 }
