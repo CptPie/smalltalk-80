@@ -5,8 +5,9 @@ use crate::{
         INSTRUCTION_POINTER_INDEX, LITERAL_START, MESSAGE_ARGUMENTS_INDEX,
         MESSAGE_DICTIONARY_INDEX, MESSAGE_SELECTOR_INDEX, MESSAGE_SIZE, METHOD_ARRAY_INDEX,
         METHOD_INDEX, MINUS_ONE_POINTER, MUST_BE_BOOLEAN_SELECTOR, NIL_POINTER, ONE_POINTER,
-        RECEIVER_INDEX, SELECTOR_START, SENDER_INDEX, STACK_POINTER_INDEX, SUPERCLASS_INDEX,
-        TEMP_FRAME_START, TRUE_POINTER, TWO_POINTER, VALUE_INDEX, ZERO_POINTER,
+        RECEIVER_INDEX, SELECTOR_START, SENDER_INDEX, SPECIAL_SELECTORS_ARRAY_POINTER,
+        STACK_POINTER_INDEX, SUPERCLASS_INDEX, TEMP_FRAME_START, TRUE_POINTER, TWO_POINTER,
+        VALUE_INDEX, ZERO_POINTER,
     },
     objectmemory::ObjectMemory,
     oop::OOP,
@@ -236,7 +237,12 @@ impl Interpreter {
     //   (currentBytecode between: 176 and: 207) ifTrue: [↑self sendSpecialSelectorBytecode].
     //   (currentBytecode between: 208 and: 255) ifTrue: [↑self sendLiteralSelectorBytecode]
     fn send_bytecode(&mut self) {
-        todo!()
+        match self.current_bytecode {
+            131..=134 => self.extended_send_bytecode(),
+            176..=207 => self.send_special_selector_bytecode(),
+            208..=255 => self.send_literal_selector_bytecode(),
+            _ => unreachable!("{} is not a send bytecode", self.current_bytecode),
+        }
     }
 
     /// Second-level dispatch for the jump bytecodes (conditional and unconditional,
@@ -1872,6 +1878,192 @@ impl Interpreter {
                 self.current_bytecode
             ),
         }
+    }
+
+    /// Sends a selector taken from one of the first sixteen literals, with an
+    /// argument count of zero, one or two.
+    ///
+    /// Both the selector index and the argument count are packed into the single
+    /// bytecode, which is what makes this the compact form the compiler reaches
+    /// for most often.
+    //
+    // see Bluebook p. 604
+    //
+    // sendLiteralSelectorBytecode
+    //   | selector |
+    //   selector ← self literal: (self extractBits: 12 to: 15
+    //                                  of: currentBytecode).
+    //   self sendSelector: selector
+    //        argumentCount: (self extractBits: 10 to: 11
+    //                             of: currentBytecode) - 1
+    fn send_literal_selector_bytecode(&mut self) {
+        let selector = self.literal(Self::extract_bits(12, 15, self.current_bytecode as u16));
+        self.send_selector_argument_count(
+            selector,
+            (Self::extract_bits(10, 11, self.current_bytecode as u16) - 1) as u8,
+        );
+    }
+
+    /// Second-level dispatch for the four extended send bytecodes: the two that
+    /// extend the literal selector form, and the two that send to super.
+    //
+    // see Bluebook p. 606
+    //
+    // extendedSendBytecode
+    //   currentBytecode = 131 ifTrue: [↑self singleExtendedSendBytecode].
+    //   currentBytecode = 132 ifTrue: [↑self doubleExtendedSendBytecode].
+    //   currentBytecode = 133 ifTrue: [↑self singleExtendedSuperBytecode].
+    //   currentBytecode = 134 ifTrue: [↑self doubleExtendedSuperBytecode]
+    fn extended_send_bytecode(&mut self) {
+        match self.current_bytecode {
+            131 => self.single_extended_send_bytecode(),
+            132 => self.double_extended_send_bytecode(),
+            133 => self.single_extended_super_bytecode(),
+            134 => self.double_extended_super_bytecode(),
+            _ => unreachable!("{} is not an extended send bytecode", self.current_bytecode),
+        }
+    }
+
+    /// Sends a selector from the first thirty two literals, with up to seven
+    /// arguments, both read from a single following descriptor byte.
+    //
+    // see Bluebook p. 606
+    //
+    // singleExtendedSendBytecode
+    //   | descriptor selectorIndex |
+    //   descriptor ← self fetchByte.
+    //   selectorIndex ← self extractBits: 11 to: 15
+    //                        of: descriptor.
+    //   self sendSelector: (self literal: selectorIndex)
+    //        argumentCount: (self extractBits: 8 to: 10
+    //                             of: descriptor)
+    fn single_extended_send_bytecode(&mut self) {
+        let descriptor = self.fetch_byte() as u16;
+        let selector_index = Self::extract_bits(11, 15, descriptor);
+        self.send_selector_argument_count(
+            self.literal(selector_index),
+            Self::extract_bits(8, 10, descriptor) as u8,
+        );
+    }
+
+    /// Sends a selector from anywhere in the literal frame, with any argument
+    /// count, each read from its own following byte.
+    //
+    // see Bluebook p. 607
+    //
+    // doubleExtendedSendBytecode
+    //   | count selector |
+    //   count ← self fetchByte.
+    //   selector ← self literal: self fetchByte.
+    //   self sendSelector: selector
+    //        argumentCount: count
+    fn double_extended_send_bytecode(&mut self) {
+        let count = self.fetch_byte();
+        let raw_selector = self.fetch_byte();
+        let selector = self.literal(raw_selector as u16);
+        self.send_selector_argument_count(selector, count);
+    }
+
+    /// The single extended send's descriptor, but starting the lookup above the
+    /// class the running method was found in. This is the bytecode compiled for a
+    /// message to super.
+    ///
+    /// The lookup begins at the superclass of the method's own class rather than
+    /// of the receiver's, which are not the same once the running method was
+    /// itself inherited. That is why every method containing this bytecode carries
+    /// its class as its last literal.
+    ///
+    /// Note that it sets the send registers itself and calls sendSelectorToClass:
+    /// directly, because sendSelector:argumentCount: would start the lookup at the
+    /// receiver's class.
+    //
+    // see Bluebook p. 607
+    //
+    // singleExtendedSuperBytecode
+    //   | descriptor selectorIndex methodClass |
+    //   descriptor ← self fetchByte.
+    //   argumentCount ← self extractBits: 8 to: 10
+    //                        of: descriptor.
+    //   selectorIndex ← self extractBits: 11 to: 15
+    //                        of: descriptor.
+    //   messageSelector ← self literal: selectorIndex.
+    //   methodClass ← self methodClassOf: method.
+    //   self sendSelectorToClass: (self superclassOf: methodClass)
+    fn single_extended_super_bytecode(&mut self) {
+        let descriptor = self.fetch_byte() as u16;
+        self.argument_count = Self::extract_bits(8, 10, descriptor) as u8;
+        let selector_index = Self::extract_bits(11, 15, descriptor);
+        self.message_selector = self.literal(selector_index);
+        let method_class = self.method_class_of(self.method);
+        self.send_selector_to_class(self.superclass_of(method_class));
+    }
+
+    /// The double extended send's two bytes, sent to super.
+    //
+    // see Bluebook p. 607
+    //
+    // doubleExtendedSuperBytecode
+    //   | methodClass |
+    //   argumentCount ← self fetchByte.
+    //   messageSelector ← self literal: self fetchByte.
+    //   methodClass ← self methodClassOf: method.
+    //   self sendSelectorToClass: (self superclassOf: methodClass)
+    fn double_extended_super_bytecode(&mut self) {
+        self.argument_count = self.fetch_byte();
+        let raw_message = self.fetch_byte();
+        self.message_selector = self.literal(raw_message as u16);
+        let method_class = self.method_class_of(self.method);
+        self.send_selector_to_class(self.superclass_of(method_class));
+    }
+
+    /// Sends one of the thirty two special selectors, whose selector and argument
+    /// count live in a shared Array rather than in the method's own literals.
+    ///
+    /// The Array holds them in alternating slots, the selector first and its
+    /// argument count in the slot after. Because these are the messages sent most
+    /// often, the primitive is attempted before the selector is even fetched.
+    //
+    // see Bluebook p. 608
+    //
+    // sendSpecialSelectorBytecode
+    //   | selectorIndex selector count |
+    //   self specialSelectorPrimitiveResponse
+    //     ifFalse: [selectorIndex ← (currentBytecode - 176) * 2.
+    //               selector ← memory fetchPointer: selectorIndex
+    //                                 ofObject: SpecialSelectorsPointer.
+    //               count ← self fetchInteger: selectorIndex + 1
+    //                            ofObject: SpecialSelectorsPointer.
+    //               self sendSelector: selector
+    //                    argumentCount: count]
+    fn send_special_selector_bytecode(&mut self) {
+        if !self.special_selector_primitive_response() {
+            let selector_index = (self.current_bytecode - 176) * 2;
+            let selector = self.memory.fetch_pointer(
+                selector_index as u16,
+                OOP::from_raw(SPECIAL_SELECTORS_ARRAY_POINTER),
+            );
+            let count = self.fetch_integer_of_object(
+                selector_index as u16 + 1,
+                OOP::from_raw(SPECIAL_SELECTORS_ARRAY_POINTER),
+            );
+            self.send_selector_argument_count(OOP::from_raw(selector), count as u8);
+        }
+    }
+
+    /// Attempts to answer one of the special selector messages with the primitive
+    /// the interpreter keeps for it.
+    ///
+    /// # Returns:
+    ///     * bool, true if the primitive produced a result and the send is complete
+    //
+    // see Bluebook p. 608, specified in chapter 29
+    //
+    // Reports failure until the primitives of chapter 29 exist, which sends the
+    // message the ordinary way instead. That is the same fallback the
+    // specification prescribes for a special selector primitive that cannot
+    // produce a result, so the interpreter stays correct meanwhile.
+    fn special_selector_primitive_response(&mut self) -> bool {
+        false // TODO implement after/with chapter 29
     }
 }
 
