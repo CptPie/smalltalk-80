@@ -433,6 +433,69 @@ mod tests {
             "the active process's suspended context must be a MethodContext"
         );
     }
+
+    // The heap is one flat address space; segments partition it for the
+    // allocator's benefit but are not a boundary an object has to respect. The
+    // Xerox image contains three chunks that begin near the top of one segment
+    // and run into the next, so the two tests below pin the behaviour that
+    // segment-bounded indexing used to get wrong.
+
+    #[test]
+    fn a_pointer_object_straddling_a_segment_boundary_reads_back_whole() {
+        let img = Image::load(fixture("snapshot.im")).expect("load failed");
+        let mem = Image::parse_into_memory(&img).expect("parse failed");
+
+        // 0x27c4 is an Association at segment 0, location 65535: only its size
+        // word fits in segment 0, so its class and both fields live in segment 1.
+        let association = OOP::from_raw(0x27c4);
+
+        assert_eq!(
+            mem.fetch_word_length_of(association),
+            2,
+            "the size word is the last word of segment 0"
+        );
+        assert_eq!(
+            mem.fetch_class_of(association),
+            0x0084,
+            "the class word is the first word of segment 1"
+        );
+        assert_eq!(
+            mem.fetch_pointer(0, association),
+            0x27c6,
+            "the key is #SwitchView, one word into segment 1"
+        );
+        assert_eq!(
+            mem.fetch_pointer(1, association),
+            0x27c8,
+            "the value is two words into segment 1"
+        );
+    }
+
+    #[test]
+    fn a_byte_object_straddling_a_segment_boundary_reads_back_whole() {
+        let img = Image::load(fixture("snapshot.im")).expect("load failed");
+        let mem = Image::parse_into_memory(&img).expect("parse failed");
+
+        // 0x4f32 is the Symbol #openBrowser at segment 1, location 65533: three
+        // of its eight words fit in segment 1 and the remaining five, holding
+        // the last nine of its eleven bytes, are in segment 2.
+        let symbol = OOP::from_raw(0x4f32);
+
+        assert_eq!(mem.fetch_byte_length_of(symbol), 11);
+
+        // Compared as a multiset, because which half of a word holds byte 0 is
+        // a separate question from whether the word is reachable at all. What
+        // this has to catch is the bytes past the boundary coming back as zero.
+        // The eleventh byte is left out for the same reason: it is the odd one,
+        // so the half of the final word it occupies, rather than the padding,
+        // is decided by that same separate question.
+        let mut bytes: Vec<u8> = (0..10).map(|index| mem.fetch_byte(index, symbol)).collect();
+        let mut expected = b"openBrowse".to_vec();
+        bytes.sort_unstable();
+        expected.sort_unstable();
+
+        assert_eq!(bytes, expected, "#openBrowser did not survive the boundary");
+    }
 }
 
 #[cfg(test)]

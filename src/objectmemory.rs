@@ -12,59 +12,29 @@ use crate::{
     oop::OOP,
 };
 
-// Custom Type definitions
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HeapSegment {
-    data: Vec<u16>,
-}
-impl HeapSegment {
-    fn new() -> Self {
-        HeapSegment {
-            data: vec![0u16; HEAP_SEGMENT_SIZE],
-        }
-    }
-}
-
-// indexing overwrites to make access as easy as array access
-impl Index<usize> for HeapSegment {
-    type Output = u16;
-
-    fn index(&self, index: usize) -> &u16 {
-        &self.data[index]
-    }
-}
-
-impl IndexMut<usize> for HeapSegment {
-    fn index_mut(&mut self, index: usize) -> &mut u16 {
-        &mut self.data[index]
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Heap {
-    data: Vec<HeapSegment>,
+    data: Vec<u16>,
 }
 
 impl Heap {
     fn new() -> Self {
         Heap {
-            data: vec![HeapSegment::new(); HEAP_SIZE],
+            data: vec![0u16; HEAP_SIZE * HEAP_SEGMENT_SIZE],
         }
     }
 }
 
-// indexing overwrites to make access as easy as array access
 impl Index<usize> for Heap {
-    type Output = HeapSegment;
-
-    fn index(&self, index: usize) -> &HeapSegment {
-        &self.data[index]
+    type Output = [u16];
+    fn index(&self, segment: usize) -> &[u16] {
+        &self.data[segment * HEAP_SEGMENT_SIZE..]
     }
 }
 
 impl IndexMut<usize> for Heap {
-    fn index_mut(&mut self, index: usize) -> &mut HeapSegment {
-        &mut self.data[index]
+    fn index_mut(&mut self, segment: usize) -> &mut [u16] {
+        &mut self.data[segment * HEAP_SEGMENT_SIZE..]
     }
 }
 
@@ -110,7 +80,8 @@ impl ObjectMemory {
         let mut heap = Heap::new();
 
         for (segment_index, segment_data) in heapdata.into_iter().enumerate() {
-            heap.data[segment_index].data[..segment_data.len()].copy_from_slice(&segment_data);
+            let start = segment_index * HEAP_SEGMENT_SIZE;
+            heap.data[start..start + segment_data.len()].copy_from_slice(&segment_data);
         }
 
         heap
