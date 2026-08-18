@@ -2317,7 +2317,7 @@ mod tests {
         seg[37] = 4; // receiver = OOP 4
         seg[38] = small_int(0); // first stack slot, pre-filled SmallInteger
 
-        let memory = ObjectMemory::from_image(vec![seg], ot);
+        let memory = ObjectMemory::from_image(vec![seg], ot, true);
         let mut interpreter = Interpreter::new(memory, OOP::from_raw(6));
 
         // new() ran fetch_context_registers: registers reflect the context.
@@ -2886,7 +2886,8 @@ mod tests {
         }
 
         fn build(&self) -> Interpreter {
-            let mut memory = ObjectMemory::from_image(vec![self.seg.clone()], self.ot.clone());
+            let mut memory =
+                ObjectMemory::from_image(vec![self.seg.clone()], self.ot.clone(), true);
             memory.rebuild_free_pointer_list();
             Interpreter::new(memory, OOP::from_raw(CONTEXT_OOP))
         }

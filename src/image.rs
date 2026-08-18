@@ -167,7 +167,7 @@ impl Image {
             object_table.push(word);
         }
 
-        let mem = ObjectMemory::from_image(heap_segments, object_table);
+        let mem = ObjectMemory::from_image(heap_segments, object_table, image.big_endian);
 
         for (oop_value, name) in [
             (NIL_POINTER, "nil"),
@@ -405,12 +405,25 @@ mod tests {
     }
 
     #[test]
-    fn parse_into_memory_be_and_le_produce_equal_memory() {
+    fn be_and_le_images_decode_to_the_same_words() {
         let img_be = Image::load(fixture("parse_be.im")).expect("load BE failed");
         let img_le = Image::load(fixture("parse_le.im")).expect("load LE failed");
         let mem_be = Image::parse_into_memory(&img_be).expect("parse BE failed");
         let mem_le = Image::parse_into_memory(&img_le).expect("parse LE failed");
-        assert_eq!(mem_be, mem_le);
+
+        // The two memories are deliberately not equal as whole values: each
+        // remembers the byte order it came from, which is the one thing about
+        // them that has to differ. What the loader normalizes is the words, so
+        // that is what this compares. Written as assert! rather than assert_eq!
+        // because the Debug of a heap is two million words wide.
+        assert!(
+            mem_be.heap_segments() == mem_le.heap_segments(),
+            "the heaps decoded to different words"
+        );
+        assert!(
+            mem_be.object_table() == mem_le.object_table(),
+            "the object tables decoded to different words"
+        );
     }
 
     #[test]
@@ -432,6 +445,39 @@ mod tests {
             CLASS_METHOD_CONTEXT_POINTER,
             "the active process's suspended context must be a MethodContext"
         );
+    }
+
+    #[test]
+    fn a_byte_object_reads_out_in_the_images_byte_order() {
+        use crate::globalconstants::{
+            CANNOT_RETURN_SELECTOR, DOES_NOT_UNDERSTAND_SELECTOR, MUST_BE_BOOLEAN_SELECTOR,
+        };
+
+        let img = Image::load(fixture("snapshot.im")).expect("load failed");
+        let mem = Image::parse_into_memory(&img).expect("parse failed");
+
+        assert!(!img.big_endian, "the premise: snapshot.im is little-endian");
+
+        // A byte object's contents are a byte stream, which the file holds the
+        // same way in either encoding, so the word the loader assembles them
+        // into is not the same: taking byte 0 from the high half, which is what
+        // the big-endian original calls for, transposes every pair here. These
+        // three selectors sit at well known OOPs, so what they spell is not open
+        // to interpretation, and #cannotReturn: is odd-length besides, which
+        // puts its last byte in the half of the final word the padding would
+        // otherwise occupy.
+        for (oop_value, spelling) in [
+            (DOES_NOT_UNDERSTAND_SELECTOR, "doesNotUnderstand:"),
+            (CANNOT_RETURN_SELECTOR, "cannotReturn:"),
+            (MUST_BE_BOOLEAN_SELECTOR, "mustBeBoolean"),
+        ] {
+            let selector = OOP::from_raw(oop_value);
+            let read: String = (0..mem.fetch_byte_length_of(selector))
+                .map(|index| mem.fetch_byte(index, selector) as char)
+                .collect();
+
+            assert_eq!(read, spelling, "selector at {oop_value:#06x}");
+        }
     }
 
     // The heap is one flat address space; segments partition it for the

@@ -28,12 +28,14 @@ impl Heap {
 impl Index<usize> for Heap {
     type Output = [u16];
     fn index(&self, segment: usize) -> &[u16] {
+        // chunks can cross segment borders, having a closed range can prevent this
         &self.data[segment * HEAP_SEGMENT_SIZE..]
     }
 }
 
 impl IndexMut<usize> for Heap {
     fn index_mut(&mut self, segment: usize) -> &mut [u16] {
+        // chunks can cross segment borders, having a closed range can prevent this
         &mut self.data[segment * HEAP_SEGMENT_SIZE..]
     }
 }
@@ -46,6 +48,15 @@ pub struct ObjectMemory {
     current_segment: u8,
     last_segment: u8,
     limit_in_last_page: u16,
+    // Byte order of the image this memory was loaded from. Word sized fields do
+    // not depend on it: the loader assembles each word from the file in the
+    // file's own order, so a pointer, a size or a class comes out the same value
+    // either way. A byte object's contents are a byte stream, which the file
+    // stores identically whichever order it uses, so the pair of bytes a word is
+    // assembled from swaps with the encoding and only byte addressing has to
+    // know. Objects the interpreter creates itself are read back the way they
+    // were written, so a consistent answer here is all that is required of them.
+    big_endian: bool,
 }
 
 impl ObjectMemory {
@@ -60,10 +71,12 @@ impl ObjectMemory {
     ///     * heap (Vec<Vec<u16>>): The heap segments. Each inner Vec holds
     ///       the words of one segment; the last segment may be partial.
     ///     * object_table (Vec<u16>): The flat object table (two words per OOP)
+    ///     * big_endian (bool): The byte order the image was encoded in, which
+    ///       decides which half of a word holds byte 0 of a chunk
     ///
     /// # Returns:
     ///     * ObjectMemory, the memory holding the supplied data
-    pub fn from_image(heap: Vec<Vec<u16>>, object_table: Vec<u16>) -> Self {
+    pub fn from_image(heap: Vec<Vec<u16>>, object_table: Vec<u16>, big_endian: bool) -> Self {
         let last_segment = (heap.len() - 1) as u8;
         let limit_in_last_page = heap.last().map(|s| s.len()).unwrap_or(0) as u16;
         ObjectMemory {
@@ -73,6 +86,7 @@ impl ObjectMemory {
             current_segment: 0,
             last_segment,
             limit_in_last_page,
+            big_endian,
         }
     }
 
@@ -470,6 +484,7 @@ mod ot_accessor_tests {
             current_segment: 0,
             last_segment: 0,
             limit_in_last_page: 0,
+            big_endian: true,
         }
     }
 
@@ -624,6 +639,7 @@ mod ot_free_list_tests {
             current_segment: 0,
             last_segment: 0,
             limit_in_last_page: 0,
+            big_endian: true,
         }
     }
 
@@ -726,6 +742,36 @@ impl ObjectMemory {
         self.heap[seg][loc + word_index as usize] = value;
     }
 
+    /// Answers whether the byte at the given offset occupies the high half of the
+    /// word holding it.
+    ///
+    /// # Parameters:
+    ///     * byte_index (u16): The byte offset within a heap chunk
+    ///
+    /// # Returns:
+    ///     * bool, true if the byte is the upper eight bits of its word
+    //
+    // The Bluebook's wordMemory answers byte 0 of a word as its high half, which
+    // is true of the big-endian original and false of a little-endian image: the
+    // byte stream in the file is the same in both, so which half of the assembled
+    // word a given byte lands in follows the encoding.
+    //
+    // This basically amounts to the following truth table, which is a logical XNOR:
+    //      ┌────────────┬─────────────────┬────────────┐
+    //      │ big_endian │ byte_index even │ high half? │
+    //      ├────────────┼─────────────────┼────────────┤
+    //      │ true       │ yes             │ true       │
+    //      ├────────────┼─────────────────┼────────────┤
+    //      │ true       │ no              │ false      │
+    //      ├────────────┼─────────────────┼────────────┤
+    //      │ false      │ yes             │ false      │
+    //      ├────────────┼─────────────────┼────────────┤
+    //      │ false      │ no              │ true       │
+    //      └────────────┴─────────────────┴────────────┘
+    fn byte_is_high_half(&self, byte_index: u16) -> bool {
+        self.big_endian == byte_index.is_multiple_of(2)
+    }
+
     /// Reads a byte from an object's heap chunk at the given byte offset.
     ///
     /// # Parameters:
@@ -746,14 +792,12 @@ impl ObjectMemory {
         let seg = self.segment_bits_of(oop) as usize;
         let loc = self.location_bits_of(oop) as usize;
         let word = self.heap[seg][loc + (byte_index / 2) as usize];
-        // Big Endian.
-        if byte_index.is_multiple_of(2) {
-            // Even byte_index is the upper byte
-            (word >> 8) as u8
+        let shift = if self.byte_is_high_half(byte_index) {
+            8
         } else {
-            // Odd byte_index is the lower byte, so we drop the high byte
-            (word & 0x00FF) as u8
-        }
+            0
+        };
+        (word >> shift) as u8
     }
 
     /// Writes a byte into an object's heap chunk at the given byte offset.
@@ -774,16 +818,15 @@ impl ObjectMemory {
         let seg = self.segment_bits_of(oop) as usize;
         let loc = self.location_bits_of(oop) as usize;
         let mut word = self.heap[seg][loc + (byte_index / 2) as usize];
-        // Big Endian.
-        if byte_index.is_multiple_of(2) {
-            // Even byte_index is the upper byte
-            word &= 0x00FF;
-            word |= (value as u16) << 8;
+        let shift = if self.byte_is_high_half(byte_index) {
+            8
         } else {
-            // Odd byte_index is the lower byte
-            word &= 0xFF00;
-            word |= value as u16;
-        }
+            0
+        };
+
+        word &= !(0xFF << shift);
+        word |= (value as u16) << shift;
+
         self.heap[seg][loc + (byte_index / 2) as usize] = word;
     }
 
@@ -950,6 +993,7 @@ mod heap_accessor_tests {
             current_segment: 0,
             last_segment: 0,
             limit_in_last_page: 0,
+            big_endian: true,
         };
         // OOP 0: segment 0, location 10
         mem.object_table[0] = 0x0000;
@@ -1048,6 +1092,7 @@ mod heap_free_chunk_tests {
             current_segment: 0,
             last_segment: 0,
             limit_in_last_page: 0,
+            big_endian: true,
         };
         // initialize free chunk list heads to NON_POINTER (empty)
         for i in 0..=(BIG_SIZE as usize) {
@@ -1588,6 +1633,7 @@ mod api_accessor_tests {
             current_segment: 0,
             last_segment: 0,
             limit_in_last_page: 0,
+            big_endian: true,
         };
 
         // initialize free chunk list heads
@@ -1713,6 +1759,7 @@ mod ref_counting_tests {
             current_segment: 0,
             last_segment: 0,
             limit_in_last_page: 0,
+            big_endian: true,
         };
 
         // OOP 0: segment 0, location 22, count=5, pointer bit=1
@@ -2171,6 +2218,7 @@ mod allocator_tests {
             current_segment: 0,
             last_segment: 0,
             limit_in_last_page: 0,
+            big_endian: true,
         };
         // mark all OT entries as free so compaction doesn't pick up garbage
         for i in (0..64).step_by(2) {
@@ -2542,6 +2590,7 @@ mod instantiation_tests {
             current_segment: 0,
             last_segment: 0,
             limit_in_last_page: 0,
+            big_endian: true,
         };
 
         // An all zero object table otherwise reads as a segment full of live
