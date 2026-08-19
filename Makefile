@@ -5,4 +5,6 @@ build:
 
 test:
 	$(ARGS) cargo test
-	
+
+run:
+	$(ARGS) cargo run

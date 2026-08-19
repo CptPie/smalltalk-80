@@ -82,6 +82,19 @@ pub const BIG_SIZE: u16 = 20;
 /// Highest chunk list index
 pub const LAST_BIG_CHUNK_LIST: u16 = 20;
 
+// Instance variable indices of the scheduler classes, needed to find the
+// context an image resumes in.
+
+/// ProcessorScheduler's activeProcess
+pub const ACTIVE_PROCESS_INDEX: u16 = 1;
+
+/// Process's suspendedContext
+pub const SUSPENDED_CONTEXT_INDEX: u16 = 1;
+
+/// A Class's name, and a Metaclass's thisClass. Both sit at the same index: a
+/// metaclass has no name of its own, it is named after the class it belongs to.
+pub const CLASS_NAME_INDEX: u16 = 6;
+
 // IMAGE HANDLING
 
 /// How many words are in each image page

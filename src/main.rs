@@ -6,6 +6,7 @@ mod image;
 mod interpreter;
 mod objectmemory;
 mod oop;
+mod trace;
 
 use crate::{
     globalconstants::{
@@ -14,11 +15,41 @@ use crate::{
         VALUE_INDEX,
     },
     image::Image,
+    interpreter::Interpreter,
     oop::OOP,
 };
 
 fn main() {
-    load_real_image("testBinaries/snapshot.im");
+    //load_real_image("testBinaries/snapshot.im");
+    run_real_image("testBinaries/snapshot.im", 100);
+}
+
+/// Boots the interpreter on an image and runs a bounded number of bytecodes,
+/// printing one line of trace before each.
+///
+/// Bounded because the image will walk into something unimplemented long before
+/// it finishes anything, and an unbounded loop would bury the interesting part
+/// under whatever it does next. What matters is the last few lines before it
+/// stops.
+///
+/// # Parameters:
+///     * path (&str): The image to run, relative to the crate root
+///     * cycles (usize): How many bytecodes to execute at most
+fn run_real_image(path: &str, cycles: usize) {
+    let path = PathBuf::from(env! {"CARGO_MANIFEST_DIR"}).join(path);
+    let image = Image::load(path.clone()).expect("load failed");
+    let memory = Image::parse_into_memory(&image).expect("parse failed");
+    let mut interpreter = Interpreter::from_memory(memory);
+
+    println!("Running image {} for {} cycles", path.display(), cycles);
+    println!("-------------------------------------------------------------------");
+    println!(" cycle    IP  Receiver Class       Method OOP   Decoded Instruction");
+    println!("-------------------------------------------------------------------");
+
+    for cycle in 0..cycles {
+        println!("{}", trace::trace_line(&interpreter, cycle));
+        interpreter.step();
+    }
 }
 
 fn load_real_image(path: &str) {

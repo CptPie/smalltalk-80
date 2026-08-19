@@ -1,13 +1,14 @@
 use crate::{
     globalconstants::{
-        CANNOT_RETURN_SELECTOR, CLASS_ARRAY_POINTER, CLASS_MESSAGE_POINTER,
+        ACTIVE_PROCESS_INDEX, CANNOT_RETURN_SELECTOR, CLASS_ARRAY_POINTER, CLASS_MESSAGE_POINTER,
         CLASS_METHOD_CONTEXT_POINTER, DOES_NOT_UNDERSTAND_SELECTOR, FALSE_POINTER, HEADER_INDEX,
         HOME_INDEX, INSTRUCTION_POINTER_INDEX, LITERAL_START, MESSAGE_ARGUMENTS_INDEX,
         MESSAGE_DICTIONARY_INDEX, MESSAGE_SELECTOR_INDEX, MESSAGE_SIZE, METHOD_ARRAY_INDEX,
         METHOD_INDEX, MINUS_ONE_POINTER, MUST_BE_BOOLEAN_SELECTOR, NIL_POINTER, ONE_POINTER,
-        RECEIVER_INDEX, SELECTOR_START, SENDER_INDEX, SPECIAL_SELECTORS_ARRAY_POINTER,
-        STACK_POINTER_INDEX, SUPERCLASS_INDEX, TEMP_FRAME_START, TRUE_POINTER, TWO_POINTER,
-        VALUE_INDEX, ZERO_POINTER,
+        RECEIVER_INDEX, SCHEDULER_ASSOCIATION_POINTER, SELECTOR_START, SENDER_INDEX,
+        SPECIAL_SELECTORS_ARRAY_POINTER, STACK_POINTER_INDEX, SUPERCLASS_INDEX,
+        SUSPENDED_CONTEXT_INDEX, TEMP_FRAME_START, TRUE_POINTER, TWO_POINTER, VALUE_INDEX,
+        ZERO_POINTER,
     },
     objectmemory::ObjectMemory,
     oop::OOP,
@@ -83,6 +84,76 @@ impl Interpreter {
         };
         interpreter.fetch_context_registers();
         interpreter
+    }
+
+    /// Builds an interpreter resuming the process a loaded image was suspended in.
+    ///
+    /// An image is a snapshot taken mid-send, so there is no entry point to call:
+    /// execution picks up in the context the snapshot interrupted. That context is
+    /// reached through the one object whose pointer the format fixes, the
+    /// association naming the scheduler.
+    ///
+    /// Runs prepare_for_execution internally, but prior execution of the same function also works
+    /// (due to it's internal checks)
+    ///
+    /// # Parameters:
+    ///     * memory (ObjectMemory): Parsed ObjectMemory from a loaded image
+    ///
+    /// # Returns:
+    ///     * Interpreter, resuming the suspended context
+    //
+    // see Bluebook p. 644
+    //
+    // firstContext
+    //   self activeProcess.
+    //   ↑self fetchPointer: SuspendedContextIndex
+    //           ofObject: self activeProcess
+    //
+    // activeProcess
+    //   ↑self fetchPointer: ActiveProcessIndex
+    //           ofObject: self schedulerPointer
+    pub fn from_memory(mut memory: ObjectMemory) -> Self {
+        memory.prepare_for_execution();
+
+        let association = OOP::from_raw(SCHEDULER_ASSOCIATION_POINTER);
+        let scheduler = OOP::from_raw(memory.fetch_pointer(VALUE_INDEX, association));
+        let process = OOP::from_raw(memory.fetch_pointer(ACTIVE_PROCESS_INDEX, scheduler));
+        let context = OOP::from_raw(memory.fetch_pointer(SUSPENDED_CONTEXT_INDEX, process));
+
+        Interpreter::new(memory, context)
+    }
+
+    /// Executes one bytecode.
+    ///
+    /// The same cycle `interpret` runs in a loop, exposed so a caller can run a
+    /// bounded number of them and look at the interpreter in between.
+    pub fn step(&mut self) {
+        self.cycle();
+    }
+
+    /// Returns the memory this interpreter is running on.
+    pub fn memory(&self) -> &ObjectMemory {
+        &self.memory
+    }
+
+    /// Returns the context currently executing.
+    pub fn active_context(&self) -> OOP {
+        self.active_context
+    }
+
+    /// Returns the CompiledMethod currently executing.
+    pub fn method(&self) -> OOP {
+        self.method
+    }
+
+    /// Returns the receiver of the currently executing method.
+    pub fn receiver(&self) -> OOP {
+        self.receiver
+    }
+
+    /// Returns the byte offset into `method` of the next bytecode to fetch.
+    pub fn ip(&self) -> usize {
+        self.ip
     }
 
     /// Runs the main interpreter loop, repeatedly executing one cycle until
@@ -2869,8 +2940,7 @@ mod tests {
         fn build(&self) -> Interpreter {
             let mut memory =
                 ObjectMemory::from_image(vec![self.seg.clone()], self.ot.clone(), true);
-            memory.rebuild_free_pointer_list();
-            memory.rebuild_free_chunk_lists();
+            memory.prepare_for_execution();
             Interpreter::new(memory, OOP::from_raw(CONTEXT_OOP))
         }
     }

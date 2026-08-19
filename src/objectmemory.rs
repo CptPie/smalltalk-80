@@ -70,6 +70,7 @@ pub struct ObjectMemory {
     // know. Objects the interpreter creates itself are read back the way they
     // were written, so a consistent answer here is all that is required of them.
     big_endian: bool,
+    prepared: bool,
 }
 
 impl ObjectMemory {
@@ -101,6 +102,7 @@ impl ObjectMemory {
             last_segment,
             limit_in_last_page,
             big_endian,
+            prepared: false,
         }
     }
 
@@ -117,9 +119,19 @@ impl ObjectMemory {
 
     /// Prepares a freshly loaded memory for execution by threading the free
     /// pointer list and the free chunk lists.
+    ///
+    /// Calling this a second time does nothing, which is not politeness but a
+    /// guard: neither rebuild is idempotent. Freeing an already free stretch
+    /// makes `to_free_chunk_list_add` read the list head, find the very chunk it
+    /// is about to push, and write it into that chunk's own next word. The list
+    /// then contains a cycle one element long, and walking it never terminates.
     pub fn prepare_for_execution(&mut self) {
+        if self.prepared {
+            return;
+        }
         self.rebuild_free_pointer_list();
         self.rebuild_free_chunk_lists();
+        self.prepared = true;
     }
 
     /// Walks the object table and threads every free OOP onto a fresh free
@@ -402,7 +414,7 @@ impl ObjectMemory {
     //  pointerBitOf: objectPointer
     //    ↑self ot: objectPointer bits: 9 to: 9
     //
-    fn pointer_bit_of(&self, oop: OOP) -> bool {
+    pub fn pointer_bit_of(&self, oop: OOP) -> bool {
         let word0 = self.object_table[oop.value as usize];
         (word0 >> 6) & 1 == 1
     }
@@ -637,6 +649,7 @@ mod ot_accessor_tests {
             limit_in_last_page: 0,
             big_endian: true,
             free_chunk_lists: [[NON_POINTER; LAST_BIG_CHUNK_LIST as usize + 1]; HEAP_SIZE],
+            prepared: false,
         }
     }
 
@@ -793,6 +806,7 @@ mod ot_free_list_tests {
             limit_in_last_page: 0,
             big_endian: true,
             free_chunk_lists: [[NON_POINTER; LAST_BIG_CHUNK_LIST as usize + 1]; HEAP_SIZE],
+            prepared: false,
         }
     }
 
@@ -1195,6 +1209,7 @@ mod heap_accessor_tests {
             limit_in_last_page: 0,
             big_endian: true,
             free_chunk_lists: [[NON_POINTER; LAST_BIG_CHUNK_LIST as usize + 1]; HEAP_SIZE],
+            prepared: false,
         };
         // OOP 0: segment 0, location 10
         mem.object_table[0] = 0x0000;
@@ -1295,6 +1310,7 @@ mod heap_free_chunk_tests {
             limit_in_last_page: 0,
             big_endian: true,
             free_chunk_lists: [[NON_POINTER; LAST_BIG_CHUNK_LIST as usize + 1]; HEAP_SIZE],
+            prepared: false,
         };
 
         mem
@@ -1831,6 +1847,7 @@ mod api_accessor_tests {
             limit_in_last_page: 0,
             big_endian: true,
             free_chunk_lists: [[NON_POINTER; LAST_BIG_CHUNK_LIST as usize + 1]; HEAP_SIZE],
+            prepared: false,
         };
 
         // OOP 0: segment 0, location 10, count=5
@@ -1951,6 +1968,7 @@ mod ref_counting_tests {
             limit_in_last_page: 0,
             big_endian: true,
             free_chunk_lists: [[NON_POINTER; LAST_BIG_CHUNK_LIST as usize + 1]; HEAP_SIZE],
+            prepared: false,
         };
 
         // OOP 0: segment 0, location 22, count=5, pointer bit=1
@@ -2397,6 +2415,7 @@ mod allocator_tests {
             limit_in_last_page: 0,
             big_endian: true,
             free_chunk_lists: [[NON_POINTER; LAST_BIG_CHUNK_LIST as usize + 1]; HEAP_SIZE],
+            prepared: false,
         };
         // mark all OT entries as free so compaction doesn't pick up garbage
         for i in (0..64).step_by(2) {
@@ -2764,6 +2783,27 @@ mod allocator_tests {
     }
 
     #[test]
+    fn preparing_twice_leaves_the_lists_walkable() {
+        let mut memory = dummy_memory();
+        memory.prepare_for_execution();
+
+        let head = memory.free_chunk_list_head(BIG_SIZE, 0);
+        let pointers = memory.free_pointer_list;
+        memory.prepare_for_execution();
+
+        // Without the guard the second pass pushes each stretch onto the list it
+        // already heads, linking the chunk to itself, and any walk of that list
+        // runs forever.
+        assert_eq!(memory.free_chunk_list_head(BIG_SIZE, 0), head);
+        assert_ne!(
+            memory.heap[0][(head + 1) as usize],
+            head,
+            "the head chunk must not be its own successor"
+        );
+        assert_eq!(memory.free_pointer_list, pointers);
+    }
+
+    #[test]
     fn live_heap_extent_follows_the_highest_object() {
         let mut memory = dummy_memory();
         assert_eq!(memory.live_heap_extent(), 0, "nothing is live yet");
@@ -2834,6 +2874,7 @@ mod instantiation_tests {
             limit_in_last_page: 0,
             big_endian: true,
             free_chunk_lists: [[NON_POINTER; LAST_BIG_CHUNK_LIST as usize + 1]; HEAP_SIZE],
+            prepared: false,
         };
 
         // An all zero object table otherwise reads as a segment full of live
