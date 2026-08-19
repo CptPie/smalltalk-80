@@ -116,7 +116,7 @@ impl Image {
     /// are present and not marked free.
     ///
     /// The returned ObjectMemory is ready for read-only inspection. Before
-    /// any allocation, call `ObjectMemory::rebuild_free_pointer_list`.
+    /// any allocation, call `ObjectMemory::prepare_for_execution`.
     ///
     /// # Parameters:
     ///     * image (&Image): The image whose bytes should be parsed
@@ -238,12 +238,14 @@ impl Image {
     /// # Returns:
     ///     * Vec<u8>, the serialised image bytes
     pub fn dump(&self, mem: &ObjectMemory) -> Vec<u8> {
+        // Where live data actually ends. The header fields the image was loaded
+        // with say where it ended *then*, which stops being true as soon as
+        // anything is allocated, so the extent is derived from the object table.
+        let heap_words = mem.live_heap_extent();
         // how many segments? (zero indexed)
-        let last_seg = mem.last_segment();
+        let last_seg = (heap_words / HEAP_SEGMENT_SIZE) as u8;
         // how many words are actually in the last segment?
-        let limit = mem.limit_in_last_page();
-        // total words contained in the heap
-        let heap_words = last_seg as usize * HEAP_SEGMENT_SIZE + limit as usize;
+        let limit = (heap_words % HEAP_SEGMENT_SIZE) as u16;
         // words in the object table
         let ot_words = mem.object_table_len();
         // where in the image does the heap end?
@@ -546,6 +548,8 @@ mod tests {
 
 #[cfg(test)]
 mod dump_tests {
+    use crate::globalconstants::{BIG_SIZE, HEADER_SIZE, NON_POINTER};
+
     use super::*;
 
     fn fixture(name: &str) -> PathBuf {
@@ -565,30 +569,93 @@ mod dump_tests {
             "length mismatch for {}",
             fixture_name
         );
+        // The three region boundaries, derived the same way dump derives them.
+        let heap_end = IMAGE_HEADER_BYTES + mem.live_heap_extent() * 2;
+        let ot_offset = heap_end.div_ceil(IMAGE_PAGE_SIZE_BYTES) * IMAGE_PAGE_SIZE_BYTES;
+
         for (i, (&d, &o)) in dumped.iter().zip(original.iter()).enumerate() {
             if d != o {
+                let region = if i < IMAGE_HEADER_BYTES {
+                    "header"
+                } else if i < heap_end {
+                    "heap"
+                } else if i < ot_offset {
+                    "gap"
+                } else {
+                    "OT"
+                };
                 panic!(
-                    "{4}: first mismatch at byte {0} ({0:#x}): dumped={1:#04x}, original={2:#04x}\n  region: {3}",
-                    i,
-                    d,
-                    o,
-                    if i < IMAGE_HEADER_BYTES {
-                        "header"
-                    } else if i < IMAGE_HEADER_BYTES
-                        + (mem.last_segment() as usize * HEAP_SEGMENT_SIZE
-                            + mem.limit_in_last_page() as usize)
-                            * 2
-                    {
-                        "heap"
-                    } else if i < (i.div_ceil(IMAGE_PAGE_SIZE_BYTES) * IMAGE_PAGE_SIZE_BYTES) {
-                        "gap"
-                    } else {
-                        "OT"
-                    },
-                    fixture_name
+                    "{4}: first mismatch at byte {0} ({0:#x}): dumped={1:#04x}, original={2:#04x}\n  region: {3} (heap {5}..{6}, OT from {7})",
+                    i, d, o, region, fixture_name, IMAGE_HEADER_BYTES, heap_end, ot_offset
                 );
             }
         }
+    }
+
+    #[test]
+    fn preparing_the_xerox_snapshot_frees_everything_above_it() {
+        let img = Image::load(fixture("snapshot.im")).expect("load failed");
+        let mut mem = Image::parse_into_memory(&img).expect("parse failed");
+        mem.prepare_for_execution();
+
+        // The image is packed solid: 18357 live objects with no gap between
+        // any two of them, ending exactly at word 4 * 65536 + 3027. So the only
+        // free space inside it is the tail of segment 4.
+        assert_eq!(mem.live_heap_extent(), 4 * HEAP_SEGMENT_SIZE + 3027);
+        assert_eq!(mem.free_chunk_list_head(BIG_SIZE, 4), 3027);
+        assert_eq!(
+            mem.heap_segments()[4][3027],
+            (HEAP_SEGMENT_SIZE - 3027) as u16,
+            "the tail of segment 4 is one chunk"
+        );
+        for segment in 0..4 {
+            for size in HEADER_SIZE..=BIG_SIZE {
+                assert_eq!(
+                    mem.free_chunk_list_head(size, segment),
+                    NON_POINTER,
+                    "segment {} list {} should be empty",
+                    segment,
+                    size
+                );
+            }
+        }
+
+        // Segments the image never reached are free in their entirety, split
+        // because 65536 words do not fit in the u16 size field.
+        assert_eq!(mem.free_chunk_list_head(BIG_SIZE, 5), 0);
+        assert_eq!(mem.heap_segments()[5][0], 65534);
+        assert_eq!(mem.free_chunk_list_head(HEADER_SIZE, 5), 65534);
+    }
+
+    #[test]
+    fn dump_follows_live_data_past_the_extent_the_image_declared() {
+        let img = Image::load(fixture("snapshot.im")).expect("load failed");
+        let mut mem = Image::parse_into_memory(&img).expect("parse failed");
+        mem.prepare_for_execution();
+        let loaded_extent = mem.live_heap_extent();
+
+        // The first allocation lands in the tail of segment 4, above everything
+        // the image header describes. Writing the heap out by those header
+        // fields would drop it on the floor.
+        let oop = mem
+            .instantiate_class_with_pointers(CLASS_ARRAY_POINTER, 8)
+            .expect("allocation failed");
+        assert!(
+            mem.live_heap_extent() > loaded_extent,
+            "the new object should sit above the loaded extent"
+        );
+
+        let path = std::env::temp_dir().join("smalltalk80_dump_extent.im");
+        img.save(&mem, &path).expect("save failed");
+        let reloaded_img = Image::load(path.clone()).expect("reload failed");
+        let reloaded = Image::parse_into_memory(&reloaded_img).expect("reparse failed");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            !reloaded.is_free_oop(oop),
+            "the new object survived the dump"
+        );
+        assert_eq!(reloaded.live_heap_extent(), mem.live_heap_extent());
     }
 
     #[test]

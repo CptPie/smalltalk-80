@@ -1,13 +1,14 @@
 use std::{
     cmp::min,
     ops::{Index, IndexMut},
+    vec,
 };
 
 use crate::{
     errors::ObjectMemoryError,
     globalconstants::{
-        BIG_SIZE, CLASS_SMALL_INTEGER_POINTER, FIRST_FREE_CHUNK_LIST, HEADER_SIZE,
-        HEAP_SEGMENT_SIZE, HEAP_SIZE, LAST_BIG_CHUNK_LIST, NIL_POINTER, NON_POINTER,
+        BIG_SIZE, CLASS_SMALL_INTEGER_POINTER, HEADER_SIZE, HEAP_SEGMENT_SIZE, HEAP_SIZE,
+        LAST_BIG_CHUNK_LIST, NIL_POINTER, NON_POINTER,
     },
     oop::OOP,
 };
@@ -40,11 +41,23 @@ impl IndexMut<usize> for Heap {
     }
 }
 
+/// One live chunk, placed in the heap's flat address space.
+///
+/// `start` is absolute rather than segment relative because a chunk may begin in
+/// one segment and end in the next, which no (segment, u16 location) pair can
+/// express once you need to reason about where it ends.
+struct LiveChunk {
+    oop: OOP,
+    start: usize,
+    size: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectMemory {
     heap: Heap,
     object_table: Vec<u16>,
     free_pointer_list: u16,
+    free_chunk_lists: [[u16; LAST_BIG_CHUNK_LIST as usize + 1]; HEAP_SIZE],
     current_segment: u8,
     last_segment: u8,
     limit_in_last_page: u16,
@@ -83,6 +96,7 @@ impl ObjectMemory {
             heap: Self::construct_heap(heap),
             object_table,
             free_pointer_list: NON_POINTER,
+            free_chunk_lists: [[NON_POINTER; LAST_BIG_CHUNK_LIST as usize + 1]; HEAP_SIZE],
             current_segment: 0,
             last_segment,
             limit_in_last_page,
@@ -101,6 +115,13 @@ impl ObjectMemory {
         heap
     }
 
+    /// Prepares a freshly loaded memory for execution by threading the free
+    /// pointer list and the free chunk lists.
+    pub fn prepare_for_execution(&mut self) {
+        self.rebuild_free_pointer_list();
+        self.rebuild_free_chunk_lists();
+    }
+
     /// Walks the object table and threads every free OOP onto a fresh free
     /// pointer chain.
     ///
@@ -117,6 +138,106 @@ impl ObjectMemory {
                 self.to_free_pointer_list_add(OOP::from_raw(oop as u16));
             }
             oop += 2;
+        }
+    }
+
+    /// Every live chunk in the heap, in ascending address order.
+    ///
+    /// The object table is the only authority on what is live: heap words carry
+    /// no tag, so a size word, a pointer field and a pair of bytecodes are
+    /// indistinguishable by inspection. Free space is therefore always derived
+    /// by subtracting this from the heap, never found by looking at it.
+    ///
+    /// # Returns:
+    ///     * Vec<LiveChunk>, sorted by start address
+    fn live_chunks(&self) -> Vec<LiveChunk> {
+        let mut chunks: Vec<LiveChunk> = Vec::new();
+
+        for entry in (0..self.object_table.len()).step_by(2) {
+            let oop = OOP::from_raw(entry as u16);
+            if self.free_bit_of(oop) {
+                continue;
+            }
+            // A size of zero is not an object, it is an object table slot that
+            // was never filled in. Its free bit is clear like a live entry's.
+            let size = self.size_bits_of(oop) as usize;
+            if size == 0 {
+                continue;
+            }
+            chunks.push(LiveChunk {
+                oop,
+                start: self.segment_bits_of(oop) as usize * HEAP_SEGMENT_SIZE
+                    + self.location_bits_of(oop) as usize,
+                size,
+            });
+        }
+
+        chunks.sort_unstable_by_key(|chunk| chunk.start);
+        chunks
+    }
+
+    /// Threads every stretch of unused heap onto the free chunk lists of the
+    /// segment holding it.
+    ///
+    /// Must be called before the first allocation, alongside
+    /// `rebuild_free_pointer_list`; not required for read-only inspection.
+    ///
+    /// An image arrives with nothing on a free chunk list, so without this the
+    /// allocator has no space to hand out and the first send fails. What counts
+    /// as free is whatever no live object covers: the tail above the highest
+    /// object, and any gap the writer left between two objects. The Xerox
+    /// snapshot happens to be packed solid, but nothing in the format promises
+    /// that, so the gaps are walked rather than assumed away.
+    //
+    // This is a helper not documented in the bluebook, which specifies a running
+    // memory rather than the loading of a snapshot into one.
+    pub fn rebuild_free_chunk_lists(&mut self) {
+        // Walk the live chunks in heap order, freeing whatever they do not
+        // cover. Two entries could in principle describe overlapping chunks, so
+        // the cursor only ever moves up.
+        let mut cursor = 0usize;
+        for chunk in self.live_chunks() {
+            if chunk.start > cursor {
+                self.free_stretch(cursor, chunk.start);
+            }
+            cursor = cursor.max(chunk.start + chunk.size);
+        }
+
+        // Everything above the highest object is free too, out to the end of the
+        // heap. That includes every segment the image never reached: the loader
+        // only fills what the file holds, while allocate_with_retries cycles
+        // through all of them looking for room.
+        self.free_stretch(cursor, HEAP_SIZE * HEAP_SEGMENT_SIZE);
+    }
+
+    /// Threads one stretch of unused heap onto the free chunk lists, splitting
+    /// it wherever it crosses a segment border.
+    ///
+    /// # Parameters:
+    ///     * start (usize): Absolute address of the first free word
+    ///     * end (usize): Absolute address one past the last free word
+    //
+    // A live chunk may straddle a segment border, a free one may not: its head
+    // lives in one segment's list and its location has to be a u16 offset inside
+    // that segment. A piece shorter than HEADER_SIZE is dropped rather than
+    // freed, since it has nowhere to keep its own size and next link.
+    fn free_stretch(&mut self, start: usize, end: usize) {
+        // A whole unused segment is one word more than the size field can name,
+        // so a piece that large goes out as two chunks rather than one.
+        const MAX_CHUNK: usize = HEAP_SEGMENT_SIZE - HEADER_SIZE as usize;
+
+        let mut piece_start = start;
+        while piece_start < end {
+            let segment = piece_start / HEAP_SEGMENT_SIZE;
+            let segment_end = (segment + 1) * HEAP_SEGMENT_SIZE;
+            let size = min(min(end, segment_end) - piece_start, MAX_CHUNK);
+
+            if size >= HEADER_SIZE as usize {
+                let location = piece_start - segment * HEAP_SEGMENT_SIZE;
+                self.to_free_chunk_list_add(segment as u8, size as u16, location as u16);
+            }
+
+            piece_start += size;
         }
     }
 
@@ -160,6 +281,23 @@ impl ObjectMemory {
         self.limit_in_last_page
     }
 
+    /// Returns the address one past the last heap word any live object occupies.
+    ///
+    /// This is where the heap actually ends, as opposed to `last_segment` and
+    /// `limit_in_last_page`, which record where the loaded image said it ended.
+    /// The two agree on a freshly loaded image and part company the moment
+    /// anything is allocated, so whoever writes the heap out has to ask here.
+    ///
+    /// # Returns:
+    ///     * usize, the exclusive upper bound of live heap data, 0 if empty
+    pub fn live_heap_extent(&self) -> usize {
+        self.live_chunks()
+            .iter()
+            .map(|chunk| chunk.start + chunk.size)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Returns a reference to the heap.
     ///
     /// Use `[seg][offset]` indexing to read individual words.
@@ -168,6 +306,19 @@ impl ObjectMemory {
     ///     * &Heap, the heap data
     pub fn heap_segments(&self) -> &Heap {
         &self.heap
+    }
+
+    /// Returns the head of one segment's free chunk list, for inspection.
+    ///
+    /// # Parameters:
+    ///     * size (u16): The chunk size naming the list, clamped to BIG_SIZE
+    ///     * segment (u8): The heap segment whose lists to read
+    ///
+    /// # Returns:
+    ///     * u16, the location of the most recently freed chunk of that size,
+    ///       or NON_POINTER if the list is empty
+    pub fn free_chunk_list_head(&self, size: u16, segment: u8) -> u16 {
+        self.head_of_free_chunk_list_in_segment(size, segment)
     }
 
     /// Returns a slice view of the raw object table.
@@ -485,6 +636,7 @@ mod ot_accessor_tests {
             last_segment: 0,
             limit_in_last_page: 0,
             big_endian: true,
+            free_chunk_lists: [[NON_POINTER; LAST_BIG_CHUNK_LIST as usize + 1]; HEAP_SIZE],
         }
     }
 
@@ -640,6 +792,7 @@ mod ot_free_list_tests {
             last_segment: 0,
             limit_in_last_page: 0,
             big_endian: true,
+            free_chunk_lists: [[NON_POINTER; LAST_BIG_CHUNK_LIST as usize + 1]; HEAP_SIZE],
         }
     }
 
@@ -894,14 +1047,65 @@ impl ObjectMemory {
         self.heap_chunk_of_word_put(oop, 1, value);
     }
 
-    // The heap is segmented into 'lists' of u16 words. Each segment holds its own Free Lists.
-    // The Lists start at FIRST_FREE_CHUNK_LIST at size 2 (chunk header size), the second at size 3
-    // and so on till BIG_SIZE=20 which is the 'overflow' list for everything bigger than 20 words.
-    // The head of a list points at the most recently freed chunk of that size.
-    // When we want to add a new item to the free list, we set that chunks class field (used here
-    // to point to the previous head of the list) to the old head. The size of the new chunk freed
-    // chunk is written to word 0 (as a double reference which list it is a part of [remember lists
-    // are determined by size]).
+    // Every heap segment holds its own set of Free Lists, one per chunk size. The
+    // first is at size 2 (chunk header size, nothing smaller can exist since a
+    // chunk has to hold its own header), the second at size 3 and so on till
+    // BIG_SIZE=20 which is the 'overflow' list for everything of that size or
+    // bigger. The head of a list points at the most recently freed chunk of that
+    // size within that segment, or NON_POINTER when the list is empty.
+    // The lists themselves are threaded through the free chunks, so they cost no
+    // storage of their own. When we want to add a new item to the free list, we
+    // set that chunks word 1 (used here to point to the previous head of the
+    // list, the bluebook reaches it through classBitsOf: since a free chunk has
+    // no class to keep there) to the old head. The size of the newly freed chunk
+    // is written to word 0 (as a double reference which list it is a part of
+    // [remember lists are determined by size]).
+    // Only the 21 heads per segment live outside the heap, in free_chunk_lists,
+    // see head_of_free_chunk_list_in_segment for why.
+
+    /// Returns the head of one segment's free chunk list for the given size.
+    ///
+    /// # Parameters:
+    ///     * size (u16): The chunk size naming the list, clamped to BIG_SIZE
+    ///     * segment (u8): The heap segment whose lists to read
+    ///
+    /// # Returns:
+    ///     * u16, the location of the most recently freed chunk of that size
+    ///       within the segment, or NON_POINTER if the list is empty
+    //
+    //  see Bluebook p. 666
+    //
+    //  headOfFreeChunkList: size inSegment: segment
+    //    ↑wordMemory segment: segment
+    //              word: FirstFreeChunkList + size
+    //
+    // Diverging from the bluebook: it keeps the list heads in the first words of
+    // each heap segment, which an image written by another virtual machine has
+    // already filled with objects, so they live in their own array here. Only the
+    // heads moved. A chunk still holds its size in word 0 and the next chunk's
+    // location in word 1, which is honest because a free chunk holds nothing else.
+    fn head_of_free_chunk_list_in_segment(&self, size: u16, segment: u8) -> u16 {
+        self.free_chunk_lists[segment as usize][min(size, BIG_SIZE) as usize]
+    }
+
+    /// Stores the head of one segment's free chunk list for the given size.
+    ///
+    /// # Parameters:
+    ///     * size (u16): The chunk size naming the list, clamped to BIG_SIZE
+    ///     * segment (u8): The heap segment whose lists to write
+    ///     * value (u16): The location to make the new head, or NON_POINTER to
+    ///       empty the list
+    //
+    //  see Bluebook p. 666
+    //
+    //  headOfFreeChunkList: size inSegment: segment put: objectPointer
+    //    ↑wordMemory segment: segment
+    //              word: FirstFreeChunkList + size
+    //              put: objectPointer
+    //
+    fn head_of_free_chunk_list_in_segment_put(&mut self, size: u16, segment: u8, value: u16) {
+        self.free_chunk_lists[segment as usize][min(size, BIG_SIZE) as usize] = value
+    }
 
     /// Adds a freed heap chunk to the appropriate size-indexed free chunk list.
     ///
@@ -925,15 +1129,14 @@ impl ObjectMemory {
     // prefix, so clippy's naming convention does not apply.
     #[allow(clippy::wrong_self_convention)]
     fn to_free_chunk_list_add(&mut self, segment: u8, size: u16, chunk_location: u16) {
-        // determine which list to insert into
-        let list_index = min(size, BIG_SIZE);
-        // get current head
-        let list_head = self.heap[segment as usize][(FIRST_FREE_CHUNK_LIST + list_index) as usize];
-        // write header at the freed chunk
+        // get current head, which becomes the new chunk's successor
+        let list_head = self.head_of_free_chunk_list_in_segment(size, segment);
+        // stamp the size, which also says which list the chunk belongs to
         self.heap[segment as usize][chunk_location as usize] = size;
+        // link the new chunk to the old head
         self.heap[segment as usize][(chunk_location + 1) as usize] = list_head;
-        // point the head to the new chunk
-        self.heap[segment as usize][(FIRST_FREE_CHUNK_LIST + list_index) as usize] = chunk_location;
+        // publish the new chunk as the head of the list
+        self.head_of_free_chunk_list_in_segment_put(size, segment, chunk_location);
     }
 
     /// Removes and returns the first chunk from the free chunk list of the given size.
@@ -964,17 +1167,14 @@ impl ObjectMemory {
         segment: u8,
         size: u16,
     ) -> Result<u16, ObjectMemoryError> {
-        // determine which list to remove from
-        let list_index = min(size, BIG_SIZE);
         // get current head
-        let target_chunk =
-            self.heap[segment as usize][(FIRST_FREE_CHUNK_LIST + list_index) as usize];
+        let target_chunk = self.head_of_free_chunk_list_in_segment(size, segment);
         if target_chunk == NON_POINTER {
             return Err(ObjectMemoryError::NoFreeEntries);
         }
         // advance to next chunk
         let next_chunk = self.heap[segment as usize][(target_chunk + 1) as usize];
-        self.heap[segment as usize][(FIRST_FREE_CHUNK_LIST + list_index) as usize] = next_chunk;
+        self.head_of_free_chunk_list_in_segment_put(size, segment, next_chunk);
         Ok(target_chunk)
     }
 }
@@ -994,6 +1194,7 @@ mod heap_accessor_tests {
             last_segment: 0,
             limit_in_last_page: 0,
             big_endian: true,
+            free_chunk_lists: [[NON_POINTER; LAST_BIG_CHUNK_LIST as usize + 1]; HEAP_SIZE],
         };
         // OOP 0: segment 0, location 10
         mem.object_table[0] = 0x0000;
@@ -1080,7 +1281,7 @@ mod heap_accessor_tests {
 
 #[cfg(test)]
 mod heap_free_chunk_tests {
-    use crate::globalconstants::{BIG_SIZE, FIRST_FREE_CHUNK_LIST, NON_POINTER};
+    use crate::globalconstants::{BIG_SIZE, NON_POINTER};
 
     use super::*;
 
@@ -1093,11 +1294,9 @@ mod heap_free_chunk_tests {
             last_segment: 0,
             limit_in_last_page: 0,
             big_endian: true,
+            free_chunk_lists: [[NON_POINTER; LAST_BIG_CHUNK_LIST as usize + 1]; HEAP_SIZE],
         };
-        // initialize free chunk list heads to NON_POINTER (empty)
-        for i in 0..=(BIG_SIZE as usize) {
-            mem.heap[0][(FIRST_FREE_CHUNK_LIST as usize) + i] = NON_POINTER;
-        }
+
         mem
     }
 
@@ -1106,7 +1305,7 @@ mod heap_free_chunk_tests {
         let mut memory = dummy_memory();
         memory.to_free_chunk_list_add(0, 4, 30);
         // list head for size 4 should point to chunk at 30
-        assert_eq!(memory.heap[0][(FIRST_FREE_CHUNK_LIST + 4) as usize], 30);
+        assert_eq!(memory.free_chunk_lists[0][4 as usize], 30);
         // chunk's size field
         assert_eq!(memory.heap[0][30], 4);
         // chunk's next pointer should be NON_POINTER (was empty)
@@ -1119,7 +1318,7 @@ mod heap_free_chunk_tests {
         memory.to_free_chunk_list_add(0, 4, 30);
         memory.to_free_chunk_list_add(0, 4, 40);
         // head should point to most recently added
-        assert_eq!(memory.heap[0][(FIRST_FREE_CHUNK_LIST + 4) as usize], 40);
+        assert_eq!(memory.free_chunk_lists[0][4 as usize], 40);
         // chain: 40 -> 30 -> NON_POINTER
         assert_eq!(memory.heap[0][41], 30);
         assert_eq!(memory.heap[0][31], NON_POINTER);
@@ -1130,10 +1329,7 @@ mod heap_free_chunk_tests {
         let mut memory = dummy_memory();
         memory.to_free_chunk_list_add(0, 25, 30);
         // should go to BIG_SIZE list, not size 25
-        assert_eq!(
-            memory.heap[0][(FIRST_FREE_CHUNK_LIST + BIG_SIZE) as usize],
-            30
-        );
+        assert_eq!(memory.free_chunk_lists[0][BIG_SIZE as usize], 30);
         // but size field should still be 25 (actual size)
         assert_eq!(memory.heap[0][30], 25);
     }
@@ -1146,7 +1342,7 @@ mod heap_free_chunk_tests {
         let result = memory.remove_from_free_chunk_list(0, 4);
         assert_eq!(result, Ok(40));
         // head should now point to 30
-        assert_eq!(memory.heap[0][(FIRST_FREE_CHUNK_LIST + 4) as usize], 30);
+        assert_eq!(memory.free_chunk_lists[0][4 as usize], 30);
     }
 
     #[test]
@@ -1621,7 +1817,7 @@ impl ObjectMemory {
 
 #[cfg(test)]
 mod api_accessor_tests {
-    use crate::globalconstants::{BIG_SIZE, FIRST_FREE_CHUNK_LIST, NON_POINTER};
+    use crate::globalconstants::NON_POINTER;
 
     use super::*;
 
@@ -1634,14 +1830,8 @@ mod api_accessor_tests {
             last_segment: 0,
             limit_in_last_page: 0,
             big_endian: true,
+            free_chunk_lists: [[NON_POINTER; LAST_BIG_CHUNK_LIST as usize + 1]; HEAP_SIZE],
         };
-
-        // initialize free chunk list heads
-        for seg in 0..3 {
-            for i in 0..=BIG_SIZE as usize {
-                mem.heap[seg][(FIRST_FREE_CHUNK_LIST as usize) + i] = NON_POINTER;
-            }
-        }
 
         // OOP 0: segment 0, location 10, count=5
         mem.object_table[0] = 0x0500;
@@ -1760,6 +1950,7 @@ mod ref_counting_tests {
             last_segment: 0,
             limit_in_last_page: 0,
             big_endian: true,
+            free_chunk_lists: [[NON_POINTER; LAST_BIG_CHUNK_LIST as usize + 1]; HEAP_SIZE],
         };
 
         // OOP 0: segment 0, location 22, count=5, pointer bit=1
@@ -1791,11 +1982,6 @@ mod ref_counting_tests {
         mem.object_table[7] = 0x002E; // location=46
         mem.heap[0][46] = 0x0002; // size 2 (header only, no fields)
         mem.heap[0][47] = 0x0020; // class
-
-        // initialize free chunk list heads
-        for i in 0..=BIG_SIZE as usize {
-            mem.heap[0][(FIRST_FREE_CHUNK_LIST as usize) + i] = NON_POINTER;
-        }
 
         mem
     }
@@ -1994,10 +2180,8 @@ impl ObjectMemory {
             // Fall through if allocation was not possible
         }
 
-        // Allocate a chunk in the big list
-        let big_list_index = (FIRST_FREE_CHUNK_LIST + BIG_SIZE) as usize;
         // Start at the 'top' of the list, if empty current == NON_POINTER
-        let mut current = self.heap[seg][big_list_index];
+        let mut current = self.head_of_free_chunk_list_in_segment(BIG_SIZE, self.current_segment);
         // Since we start at the 'top' of the list, the previous entry is None
         let mut prev_location: Option<u16> = None;
 
@@ -2009,7 +2193,11 @@ impl ObjectMemory {
                 match prev_location {
                     // If we were at the top, set the 'top' of the list, to the next entry
                     // -> removing the top, so this item in the process
-                    None => self.heap[seg][big_list_index] = next,
+                    None => self.head_of_free_chunk_list_in_segment_put(
+                        BIG_SIZE,
+                        self.current_segment,
+                        next,
+                    ),
                     // If we're in the middle of the list, set the next item of the previous item
                     // to this item's next item, removing this item from the chain
                     Some(prev) => self.heap[seg][(prev + 1) as usize] = next,
@@ -2123,9 +2311,7 @@ impl ObjectMemory {
     //    ↑lowWaterMark
     //
     fn abandon_free_chunks_in_segment(&mut self, segment: u8) {
-        for i in 0..=BIG_SIZE {
-            self.heap[segment as usize][(FIRST_FREE_CHUNK_LIST + i) as usize] = NON_POINTER
-        }
+        self.free_chunk_lists[segment as usize] = [NON_POINTER; LAST_BIG_CHUNK_LIST as usize + 1];
     }
 
     /// Compacts the current heap segment by sliding all live objects toward the bottom.
@@ -2144,69 +2330,60 @@ impl ObjectMemory {
     //          location: bigSpace)]
     //
     fn compact_current_segment(&mut self) {
+        let segment_start = self.current_segment as usize * HEAP_SEGMENT_SIZE;
+        let segment_end = segment_start + HEAP_SEGMENT_SIZE;
+
         // 'forget' all free chunks since we'll realign anyways
         self.abandon_free_chunks_in_segment(self.current_segment);
 
-        // temporary structure to keep track of things
-        struct Entry {
-            oop: OOP,
-            location: u16,
-            size: u16,
-        }
+        // A chunk belonging to the segment below may reach across the border and
+        // occupy the first words of this one. It is not ours to move, and its
+        // owner will not be told about a new location, so the slide has to begin
+        // above whatever spills in. A chunk is at most 65535 words, so only the
+        // one segment below can reach us.
+        let mut low_mark = segment_start;
+        let mut entries: Vec<LiveChunk> = Vec::new();
 
-        let mut entries: Vec<Entry> = Vec::new();
-
-        // loop through the object table, take a look at each OOP (every second word)
-        for i in (0..self.object_table.len()).step_by(2) {
-            let oop = OOP::from_raw(i as u16);
-
-            // If it is not free (so an object) and part of the segment we're currently compacting
-            // save it to the list
-            if !self.free_bit_of(oop) && self.segment_bits_of(oop) == self.current_segment {
-                entries.push(Entry {
-                    oop,
-                    location: self.location_bits_of(oop),
-                    size: self.size_bits_of(oop),
-                });
+        for chunk in self.live_chunks() {
+            if self.segment_bits_of(chunk.oop) == self.current_segment {
+                entries.push(chunk);
+            } else if chunk.start < segment_start && chunk.start + chunk.size > segment_start {
+                low_mark = low_mark.max(chunk.start + chunk.size);
             }
         }
 
-        // sort the list in ascending order of the location
-        entries.sort_by_key(|e| e.location);
-
-        // slide the elements to the front to free up space at the back
-        let mut low_mark = LAST_BIG_CHUNK_LIST + 1;
+        // slide the elements to the front to free up space at the back. The
+        // addresses are absolute, so an object reaching into the segment above
+        // is copied whole rather than wrapping around at the border.
         for entry in &entries {
-            if entry.location > low_mark {
-                for i in 0..entry.size {
-                    self.heap[self.current_segment as usize][(low_mark + i) as usize] =
-                        self.heap[self.current_segment as usize][(entry.location + i) as usize]
-                }
-                self.location_bits_of_put(entry.oop, low_mark);
+            if entry.start < low_mark {
+                // we fucked up somehow: live chunks are not allowed to overlap
+                panic!(
+                    "Compacting failed, chunk at {} overlaps the one below it",
+                    entry.start
+                );
             }
-            if entry.location == low_mark {
-                // do nothing, entry is already in place
-            }
-            if entry.location < low_mark {
-                // we fucked up somehow
-                panic!("Compacting failed, sorted entries were not sorted");
+            if entry.start > low_mark {
+                self.heap
+                    .data
+                    .copy_within(entry.start..entry.start + entry.size, low_mark);
+                self.location_bits_of_put(entry.oop, (low_mark - segment_start) as u16);
             }
             low_mark += entry.size;
         }
 
-        if let Some(last) = entries.last() {
-            let old_end = last.location + last.size;
-            let remaining = old_end - low_mark;
-            if remaining > 0 {
-                self.to_free_chunk_list_add(self.current_segment, remaining, low_mark);
-            }
+        // Everything from the new top of the segment to its end is free. The
+        // last object may reach past the border, in which case there is nothing
+        // left in this segment to hand back.
+        if low_mark < segment_end {
+            self.free_stretch(low_mark, segment_end);
         }
     }
 }
 
 #[cfg(test)]
 mod allocator_tests {
-    use crate::globalconstants::{BIG_SIZE, FIRST_FREE_CHUNK_LIST, NON_POINTER};
+    use crate::globalconstants::{BIG_SIZE, NON_POINTER};
 
     use super::*;
 
@@ -2219,15 +2396,13 @@ mod allocator_tests {
             last_segment: 0,
             limit_in_last_page: 0,
             big_endian: true,
+            free_chunk_lists: [[NON_POINTER; LAST_BIG_CHUNK_LIST as usize + 1]; HEAP_SIZE],
         };
         // mark all OT entries as free so compaction doesn't pick up garbage
         for i in (0..64).step_by(2) {
             mem.free_bit_of_put(OOP::from_raw(i as u16), true);
         }
-        // initialize free chunk list heads to NON_POINTER (empty)
-        for i in 0..=(BIG_SIZE as usize) {
-            mem.heap[0][(FIRST_FREE_CHUNK_LIST as usize) + i] = NON_POINTER;
-        }
+
         mem
     }
 
@@ -2262,10 +2437,7 @@ mod allocator_tests {
         let result = memory.attempt_to_allocate_chunk_in_current_segment(4);
         assert_eq!(result, Ok(30));
         // remainder (size 26) should be on the big free list
-        assert_eq!(
-            memory.heap[0][(FIRST_FREE_CHUNK_LIST + BIG_SIZE) as usize],
-            34
-        );
+        assert_eq!(memory.free_chunk_lists[0][BIG_SIZE as usize], 34);
         assert_eq!(memory.heap[0][34], 26); // remainder size
     }
 
@@ -2287,7 +2459,7 @@ mod allocator_tests {
         let result = memory.attempt_to_allocate_chunk_in_current_segment(4);
         assert_eq!(result, Ok(50));
         // remainder (size 18) should be on the free list
-        assert_eq!(memory.heap[0][(FIRST_FREE_CHUNK_LIST + 18) as usize], 54);
+        assert_eq!(memory.free_chunk_lists[0][18 as usize], 54);
     }
 
     #[test]
@@ -2342,7 +2514,7 @@ mod allocator_tests {
         assert!(memory.free_bit_of(OOP::from_raw(4)));
         assert_eq!(memory.free_pointer_list, 4);
         // heap chunk should be on free chunk list for size 6
-        assert_eq!(memory.heap[0][(FIRST_FREE_CHUNK_LIST + 6) as usize], 30);
+        assert_eq!(memory.free_chunk_lists[0][6 as usize], 30);
     }
 
     #[test]
@@ -2381,8 +2553,7 @@ mod allocator_tests {
         // all list heads should be NON_POINTER
         for i in 0..=BIG_SIZE as usize {
             assert_eq!(
-                memory.heap[0][(FIRST_FREE_CHUNK_LIST as usize) + i],
-                NON_POINTER,
+                memory.free_chunk_lists[0][i], NON_POINTER,
                 "free list head at index {} was not cleared",
                 i
             );
@@ -2392,10 +2563,7 @@ mod allocator_tests {
     #[test]
     fn abandon_only_affects_target_segment() {
         let mut memory = dummy_memory();
-        // initialize segment 1 free list heads
-        for i in 0..=(BIG_SIZE as usize) {
-            memory.heap[1][(FIRST_FREE_CHUNK_LIST as usize) + i] = NON_POINTER;
-        }
+
         // add chunks to both segments
         memory.to_free_chunk_list_add(0, 4, 100);
         memory.to_free_chunk_list_add(1, 4, 100);
@@ -2403,12 +2571,9 @@ mod allocator_tests {
         memory.abandon_free_chunks_in_segment(0);
 
         // segment 0 should be cleared
-        assert_eq!(
-            memory.heap[0][(FIRST_FREE_CHUNK_LIST + 4) as usize],
-            NON_POINTER
-        );
+        assert_eq!(memory.free_chunk_lists[0][4 as usize], NON_POINTER);
         // segment 1 should still have its chunk
-        assert_eq!(memory.heap[1][(FIRST_FREE_CHUNK_LIST + 4) as usize], 100);
+        assert_eq!(memory.free_chunk_lists[1][4 as usize], 100);
     }
 
     // ┌──────────────────────────────────────────────���───┐
@@ -2436,7 +2601,7 @@ mod allocator_tests {
         memory.compact_current_segment();
 
         // Both objects should be slid to the front (after free list heads)
-        let base = (LAST_BIG_CHUNK_LIST + 1) as usize;
+        let base = 0;
 
         // Object A should be at base
         assert_eq!(memory.location_bits_of(OOP::from_raw(0)), base as u16);
@@ -2456,7 +2621,7 @@ mod allocator_tests {
     #[test]
     fn compact_already_packed_is_noop() {
         let mut memory = dummy_memory();
-        let base = LAST_BIG_CHUNK_LIST + 1;
+        let base = 0;
 
         // Object already at the lowest possible location
         memory.object_table[0] = 0x0100; // count=1
@@ -2485,21 +2650,15 @@ mod allocator_tests {
 
         memory.compact_current_segment();
 
-        let base = LAST_BIG_CHUNK_LIST + 1;
+        let base = 0;
         let free_start = base + 4;
         // The gap between original end (204) and new end should be a free chunk
         let free_size = 204 - free_start;
         // free chunk should be on the appropriate list
         if free_size >= BIG_SIZE {
-            assert_eq!(
-                memory.heap[0][(FIRST_FREE_CHUNK_LIST + BIG_SIZE) as usize],
-                free_start
-            );
+            assert_eq!(memory.free_chunk_lists[0][BIG_SIZE as usize], free_start);
         } else {
-            assert_eq!(
-                memory.heap[0][(FIRST_FREE_CHUNK_LIST + free_size) as usize],
-                free_start
-            );
+            assert_eq!(memory.free_chunk_lists[0][free_size as usize], free_start);
         }
     }
 
@@ -2525,13 +2684,96 @@ mod allocator_tests {
 
         memory.compact_current_segment();
 
-        let base = (LAST_BIG_CHUNK_LIST + 1) as usize;
+        let base = 0;
         // OOP 0 at base
         assert_eq!(memory.location_bits_of(OOP::from_raw(0)), base as u16);
         // OOP 4 right after
         assert_eq!(memory.location_bits_of(OOP::from_raw(4)), (base + 3) as u16);
         // OOP 2 still free
         assert!(memory.free_bit_of(OOP::from_raw(2)));
+    }
+
+    #[test]
+    fn compact_leaves_a_chunk_spilling_in_from_below_alone() {
+        let mut memory = dummy_memory();
+        memory.current_segment = 1;
+
+        // OOP 0: segment 0, location 65534, size 4. Only its size and class word
+        // fit in segment 0, the two fields sit in the first words of segment 1.
+        memory.object_table[0] = 0x0100;
+        memory.object_table[1] = 65534;
+        memory.heap[0][65534] = 4;
+        memory.heap[0][65535] = 0x0020;
+        memory.heap[0][65536] = 0xAAAA;
+        memory.heap[0][65537] = 0xBBBB;
+
+        // OOP 2: segment 1, location 100, size 3
+        memory.object_table[2] = 0x0101;
+        memory.object_table[3] = 100;
+        memory.heap[1][100] = 3;
+        memory.heap[1][101] = 0x0020;
+        memory.heap[1][102] = 0xCCCC;
+
+        memory.compact_current_segment();
+
+        // The slide has to start above the two words that spill in, not at 0.
+        assert_eq!(memory.location_bits_of(OOP::from_raw(2)), 2);
+        assert_eq!(memory.heap[1][2], 3);
+        assert_eq!(memory.heap[1][4], 0xCCCC);
+        // The spilled tail is untouched and its owner still points at it.
+        assert_eq!(memory.heap[1][0], 0xAAAA);
+        assert_eq!(memory.heap[1][1], 0xBBBB);
+        assert_eq!(memory.location_bits_of(OOP::from_raw(0)), 65534);
+    }
+
+    #[test]
+    fn compact_moves_a_chunk_that_reaches_into_the_segment_above() {
+        let mut memory = dummy_memory();
+
+        // OOP 0: segment 0, location 65534, size 4, so half of it lives in
+        // segment 1. Sliding it down has to copy all four words.
+        memory.object_table[0] = 0x0100;
+        memory.object_table[1] = 65534;
+        memory.heap[0][65534] = 4;
+        memory.heap[0][65535] = 0x0020;
+        memory.heap[0][65536] = 0xAAAA;
+        memory.heap[0][65537] = 0xBBBB;
+
+        memory.compact_current_segment();
+
+        assert_eq!(memory.location_bits_of(OOP::from_raw(0)), 0);
+        assert_eq!(memory.heap[0][0], 4);
+        assert_eq!(memory.heap[0][1], 0x0020);
+        assert_eq!(memory.heap[0][2], 0xAAAA);
+        assert_eq!(memory.heap[0][3], 0xBBBB);
+    }
+
+    #[test]
+    fn rebuild_reaches_the_segments_the_image_never_filled() {
+        let mut memory = dummy_memory();
+        memory.rebuild_free_chunk_lists();
+
+        // A wholly unused segment is 65536 words, one more than the size field
+        // can name, so it is handed back as a big chunk plus a minimal one.
+        assert_eq!(memory.free_chunk_lists[HEAP_SIZE - 1][BIG_SIZE as usize], 0);
+        assert_eq!(memory.heap[HEAP_SIZE - 1][0], 65534);
+        assert_eq!(
+            memory.free_chunk_lists[HEAP_SIZE - 1][HEADER_SIZE as usize],
+            65534
+        );
+    }
+
+    #[test]
+    fn live_heap_extent_follows_the_highest_object() {
+        let mut memory = dummy_memory();
+        assert_eq!(memory.live_heap_extent(), 0, "nothing is live yet");
+
+        // OOP 0: segment 1, location 100, size 3
+        memory.object_table[0] = 0x0101;
+        memory.object_table[1] = 100;
+        memory.heap[1][100] = 3;
+
+        assert_eq!(memory.live_heap_extent(), HEAP_SEGMENT_SIZE + 103);
     }
 
     #[test]
@@ -2556,7 +2798,7 @@ mod allocator_tests {
         memory.compact_current_segment();
 
         // OOP 0 should have moved (segment 0 was compacted)
-        let base = LAST_BIG_CHUNK_LIST + 1;
+        let base = 0;
         assert_eq!(memory.location_bits_of(OOP::from_raw(0)), base);
         // OOP 2 should be untouched (segment 1)
         assert_eq!(memory.location_bits_of(OOP::from_raw(2)), 100);
@@ -2565,7 +2807,7 @@ mod allocator_tests {
 
 #[cfg(test)]
 mod instantiation_tests {
-    use crate::globalconstants::{BIG_SIZE, FIRST_FREE_CHUNK_LIST, NON_POINTER};
+    use crate::globalconstants::NON_POINTER;
 
     use super::*;
 
@@ -2591,6 +2833,7 @@ mod instantiation_tests {
             last_segment: 0,
             limit_in_last_page: 0,
             big_endian: true,
+            free_chunk_lists: [[NON_POINTER; LAST_BIG_CHUNK_LIST as usize + 1]; HEAP_SIZE],
         };
 
         // An all zero object table otherwise reads as a segment full of live
@@ -2599,9 +2842,6 @@ mod instantiation_tests {
             mem.free_bit_of_put(OOP::from_raw(oop as u16), true);
         }
 
-        for i in 0..=(BIG_SIZE as usize) {
-            mem.heap[0][(FIRST_FREE_CHUNK_LIST as usize) + i] = NON_POINTER;
-        }
         mem.to_free_chunk_list_add(0, CHUNK_SIZE, CHUNK_LOCATION);
 
         // Entries below 16 are where a real image keeps its well known pointers,

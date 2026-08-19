@@ -79,10 +79,7 @@ pub const NON_POINTER: u16 = 0xFFFF;
 /// How many fields a object should have till its considered 'big'
 pub const BIG_SIZE: u16 = 20;
 
-/// The offset to the first free chunk list
-pub const FIRST_FREE_CHUNK_LIST: u16 = 0;
-
-/// FIRST_FREE_CHUNK_LIST + BIG_SIZE
+/// Highest chunk list index
 pub const LAST_BIG_CHUNK_LIST: u16 = 20;
 
 // IMAGE HANDLING

@@ -2242,10 +2242,7 @@ impl Interpreter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::globalconstants::{
-        BIG_SIZE, FIRST_FREE_CHUNK_LIST, HEADER_SIZE, LAST_BIG_CHUNK_LIST, NON_POINTER,
-        SENDER_INDEX,
-    };
+    use crate::globalconstants::{HEADER_SIZE, SENDER_INDEX};
     use crate::objectmemory::ObjectMemory;
     use crate::oop::OOP;
 
@@ -2469,13 +2466,6 @@ mod tests {
     const ROOT_METHODS_LOCATION: u16 = 710;
     const METHOD_Z_LOCATION: u16 = 730;
     const SENDER_CONTEXT_LOCATION: u16 = 750;
-
-    /// A single free chunk covering the tail of the segment, so that the object
-    /// memory has somewhere to allocate from. Large enough to land on the big
-    /// chunk list, which is where attemptToAllocateChunkInCurrentSegment falls
-    /// through to once the exact fit list comes up empty.
-    const FREE_CHUNK_LOCATION: u16 = 800;
-    const FREE_CHUNK_SIZE: u16 = 200;
 
     /// The first object table entry left free for allocation, and how many.
     const FIRST_FREE_ENTRY: u16 = 100;
@@ -2701,15 +2691,6 @@ mod tests {
                 }
             }
 
-            // Free chunk list heads are empty, then one big chunk is threaded
-            // onto the big list so that instantiateClass has somewhere to go.
-            for list in FIRST_FREE_CHUNK_LIST..=LAST_BIG_CHUNK_LIST {
-                seg[list as usize] = NON_POINTER;
-            }
-            seg[FREE_CHUNK_LOCATION as usize] = FREE_CHUNK_SIZE;
-            seg[(FREE_CHUNK_LOCATION + 1) as usize] = NON_POINTER;
-            seg[(FIRST_FREE_CHUNK_LIST + BIG_SIZE) as usize] = FREE_CHUNK_LOCATION;
-
             // Object table entries reserved for allocation. rebuild_free_pointer_list
             // threads exactly those entries whose free bit is set.
             for entry in 0..FREE_ENTRY_COUNT {
@@ -2889,6 +2870,7 @@ mod tests {
             let mut memory =
                 ObjectMemory::from_image(vec![self.seg.clone()], self.ot.clone(), true);
             memory.rebuild_free_pointer_list();
+            memory.rebuild_free_chunk_lists();
             Interpreter::new(memory, OOP::from_raw(CONTEXT_OOP))
         }
     }
