@@ -11,7 +11,7 @@ use crate::{
         CLASS_NAME_INDEX, FALSE_POINTER, HEADER_INDEX, LITERAL_START, NIL_POINTER,
         SPECIAL_SELECTORS_ARRAY_POINTER, TRUE_POINTER,
     },
-    inspect::ContextFrame,
+    inspect::{self, ContextFrame},
     interpreter::Interpreter,
     objectmemory::ObjectMemory,
     oop::OOP,
@@ -221,6 +221,11 @@ pub fn decode(memory: &ObjectMemory, method: OOP, ip: usize) -> Instruction {
 
 /// Decodes every bytecode of a method, in order.
 ///
+/// The last few bytes of a CompiledMethod are not code but the pointer to its
+/// source in the .sources file, and they come out decoded as whatever
+/// bytecodes their values happen to be. A listing shows them after the final
+/// return, where nothing reaches them.
+///
 /// # Parameters:
 ///     * memory (&ObjectMemory): The memory holding the method
 ///     * method (OOP): The CompiledMethod to disassemble
@@ -228,7 +233,18 @@ pub fn decode(memory: &ObjectMemory, method: OOP, ip: usize) -> Instruction {
 /// # Returns:
 ///     * Vec<(usize, Instruction)>, each bytecode with its byte offset
 pub fn disassemble(memory: &ObjectMemory, method: OOP) -> Vec<(usize, Instruction)> {
-    todo!()
+    let end = memory.fetch_byte_length_of(method) as usize;
+    let mut listing = Vec::new();
+    let mut ip = first_bytecode_of(memory, method);
+
+    while ip < end {
+        let instruction = decode(memory, method, ip);
+        let length = instruction.length;
+        listing.push((ip, instruction));
+        ip += length;
+    }
+
+    listing
 }
 
 /// Renders an object as something a reader can recognise.
@@ -338,7 +354,16 @@ pub fn class_name(memory: &ObjectMemory, class: OOP) -> String {
 /// # Returns:
 ///     * String, e.g. `[.. 3, #foo, nil]`, empty brackets for an empty stack
 pub fn stack_top(memory: &ObjectMemory, frame: &ContextFrame, depth: usize) -> String {
-    todo!()
+    let start = frame.stack.len().saturating_sub(depth);
+
+    let collection: Vec<String> = frame.stack[start..]
+        .iter()
+        .map(|oop| describe(memory, *oop))
+        .collect();
+
+    let elided = if start > 0 { ".. " } else { "" };
+
+    format!("[{}{}]", elided, collection.join(", "))
 }
 
 /// Renders one frame as a line of a stack dump.
@@ -350,7 +375,23 @@ pub fn stack_top(memory: &ObjectMemory, frame: &ContextFrame, depth: usize) -> S
 /// # Returns:
 ///     * String, e.g. `0x9a54  SystemDictionary  0x6b64 @143  [temps: 4] [stack: nil, false]`
 pub fn frame_line(memory: &ObjectMemory, frame: &ContextFrame) -> String {
-    todo!()
+    let context_addr = frame.context.value;
+    let receiver_class = class_name(memory, OOP::from_raw(memory.fetch_class_of(frame.receiver)));
+    let method_addr = frame.method.value;
+    let ip_string = match frame.ip {
+        Some(val) => format!("@{}", val),
+        None => String::from("returned"),
+    };
+
+    format!(
+        "{:#06x} {} {:#06x} {} [temps: {}] stack: {}",
+        context_addr,
+        receiver_class,
+        method_addr,
+        ip_string,
+        frame.temporaries.len(),
+        stack_top(memory, frame, 3)
+    )
 }
 
 /// Renders a sender chain, innermost frame first, one frame per line.
@@ -362,7 +403,11 @@ pub fn frame_line(memory: &ObjectMemory, frame: &ContextFrame) -> String {
 /// # Returns:
 ///     * String, lines joined with newlines, no trailing newline
 pub fn chain_dump(memory: &ObjectMemory, frames: &[ContextFrame]) -> String {
-    todo!()
+    frames
+        .iter()
+        .map(|frame| frame_line(memory, frame))
+        .collect::<Vec<String>>()
+        .join("\n")
 }
 
 /// Renders one line of trace for the bytecode the interpreter is about to run.
@@ -384,13 +429,16 @@ pub fn trace_line(interpreter: &Interpreter, cycle: usize) -> String {
         OOP::from_raw(memory.fetch_class_of(interpreter.receiver())),
     );
 
+    let frame = inspect::active_frame(interpreter);
+
     format!(
-        "{:>6} {:>5}  {:<20} {:<#06x}       {}",
+        "{:>6} {:>5}  {:<20} {:<#06x}       {:<40} {}",
         cycle,
         interpreter.ip(),
         receiver_class,
         interpreter.method().value,
-        decode(memory, interpreter.method(), interpreter.ip()).text
+        decode(memory, interpreter.method(), interpreter.ip()).text,
+        stack_top(memory, &frame, 3)
     )
 }
 
@@ -400,9 +448,9 @@ mod tests {
 
     use crate::{
         globalconstants::{
-            ACTIVE_PROCESS_INDEX, CLASS_STRING_POINTER, DOES_NOT_UNDERSTAND_SELECTOR,
-            INSTRUCTION_POINTER_INDEX, METHOD_INDEX, NIL_POINTER, SCHEDULER_ASSOCIATION_POINTER,
-            SUSPENDED_CONTEXT_INDEX, VALUE_INDEX,
+            ACTIVE_PROCESS_INDEX, CLASS_COMPILED_METHOD_POINTER, CLASS_STRING_POINTER,
+            DOES_NOT_UNDERSTAND_SELECTOR, INSTRUCTION_POINTER_INDEX, METHOD_INDEX, NIL_POINTER,
+            SCHEDULER_ASSOCIATION_POINTER, SUSPENDED_CONTEXT_INDEX, VALUE_INDEX,
         },
         image::Image,
     };
@@ -492,6 +540,64 @@ mod tests {
         // Double extended sends, which spend a byte each on count and literal.
         assert_eq!(at(148), "send #& (1 args)");
         assert_eq!(at(153), "send #quitPrimitive (0 args)");
+    }
+
+    #[test]
+    fn disassembling_a_method_lists_every_bytecode_from_the_first_to_the_last() {
+        let memory = snapshot();
+
+        let association = OOP::from_raw(SCHEDULER_ASSOCIATION_POINTER);
+        let scheduler = OOP::from_raw(memory.fetch_pointer(VALUE_INDEX, association));
+        let process = OOP::from_raw(memory.fetch_pointer(ACTIVE_PROCESS_INDEX, scheduler));
+        let context = OOP::from_raw(memory.fetch_pointer(SUSPENDED_CONTEXT_INDEX, process));
+        let method = OOP::from_raw(memory.fetch_pointer(METHOD_INDEX, context));
+
+        let listing = disassemble(&memory, method);
+
+        // Starts where the literals end, not at the header.
+        assert_eq!(listing[0].0, first_bytecode_of(&memory, method));
+        assert_eq!(listing[0].0, 76);
+        assert_eq!(listing[0].1.text, "push binding #Cursor");
+
+        // Lands on the resume point, which is only possible if every length
+        // before it was right.
+        let resume = listing
+            .iter()
+            .find(|(ip, _)| *ip == 143)
+            .expect("the walk reaches the resume point");
+        assert_eq!(resume.1.text, "send #isNil (0 args)");
+
+        // The offsets and lengths tile the bytes with no gaps and no overlaps.
+        for pair in listing.windows(2) {
+            assert_eq!(pair[0].0 + pair[0].1.length, pair[1].0);
+        }
+    }
+
+    #[test]
+    fn disassembling_stops_at_the_byte_length_not_the_word_length() {
+        let memory = snapshot();
+
+        // A method with an odd number of bytes has one padding byte in its
+        // last word. The byte length excludes it, the word length would not,
+        // and decoding it would add a phantom instruction past the end.
+        let odd = (0..memory.object_table_len())
+            .step_by(2)
+            .map(|entry| OOP::from_raw(entry as u16))
+            .find(|oop| {
+                !memory.is_free_oop(*oop)
+                    && memory.fetch_class_of(*oop) == CLASS_COMPILED_METHOD_POINTER
+                    && memory.fetch_byte_length_of(*oop) % 2 == 1
+            })
+            .expect("the image has a method with an odd byte count");
+
+        let listing = disassemble(&memory, odd);
+        let (last_ip, last) = listing.last().expect("the method has bytecodes");
+
+        assert_eq!(
+            *last_ip + last.length,
+            memory.fetch_byte_length_of(odd) as usize,
+            "the last instruction ends exactly at the byte length"
+        );
     }
 
     #[test]

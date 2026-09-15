@@ -43,13 +43,30 @@ fn run_real_image(path: &str, cycles: usize) {
     let mut interpreter = Interpreter::from_memory(memory);
 
     println!("Running image {} for {} cycles", path.display(), cycles);
-    println!("-------------------------------------------------------------------");
-    println!(" cycle    IP  Receiver Class       Method OOP   Decoded Instruction");
-    println!("-------------------------------------------------------------------");
+    println!(
+        "----------------------------------------------------------------------------------------------------------------------"
+    );
+    println!(
+        " cycle    IP  Receiver Class       Method OOP   Decoded Instruction                      Stack"
+    );
+    println!(
+        "----------------------------------------------------------------------------------------------------------------------"
+    );
 
-    for cycle in 0..cycles {
-        println!("{}", trace::trace_line(&interpreter, cycle));
-        interpreter.step();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for cycle in 0..cycles {
+            println!("{}", trace::trace_line(&interpreter, cycle));
+            interpreter.step();
+        }
+    }));
+
+    println!(
+        "{}",
+        trace::chain_dump(interpreter.memory(), &inspect::sender_chain(&interpreter))
+    );
+
+    if outcome.is_err() {
+        println!("stopped by a panic; the stack above is where it was")
     }
 }
 
