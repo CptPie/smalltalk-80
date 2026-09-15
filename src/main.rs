@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+mod debugger;
 mod errors;
 mod globalconstants;
 mod image;
