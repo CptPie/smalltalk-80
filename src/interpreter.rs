@@ -14,6 +14,8 @@ use crate::{
     oop::OOP,
 };
 
+mod primitives;
+
 #[derive(Clone, Copy)]
 struct MethodCacheEntry {
     selector: OOP,
@@ -1440,21 +1442,6 @@ impl Interpreter {
         }
     }
 
-    /// Attempts to answer the current message with a primitive routine.
-    ///
-    /// # Returns:
-    ///     * bool, true if the primitive produced a result and the send is complete
-    //
-    // see Bluebook p. 605, specified in chapter 29
-    //
-    // Reporting failure is what the specification prescribes when a method has no
-    // primitive or its primitive cannot produce a result, and it means the method's
-    // Smalltalk body runs instead. Until chapter 29 exists this reports failure
-    // unconditionally, which is correct for every method that has a fallback body.
-    fn primitive_response(&mut self) -> bool {
-        false // TODO implement after/at chapter 29
-    }
-
     /// Builds a MethodContext for new_method, moves the receiver and arguments into
     /// it off the sending context's stack, and enters it.
     ///
@@ -2169,22 +2156,6 @@ impl Interpreter {
             );
             self.send_selector_argument_count(OOP::from_raw(selector), count as u8);
         }
-    }
-
-    /// Attempts to answer one of the special selector messages with the primitive
-    /// the interpreter keeps for it.
-    ///
-    /// # Returns:
-    ///     * bool, true if the primitive produced a result and the send is complete
-    //
-    // see Bluebook p. 608, specified in chapter 29
-    //
-    // Reports failure until the primitives of chapter 29 exist, which sends the
-    // message the ordinary way instead. That is the same fallback the
-    // specification prescribes for a special selector primitive that cannot
-    // produce a result, so the interpreter stays correct meanwhile.
-    fn special_selector_primitive_response(&mut self) -> bool {
-        false // TODO implement after/with chapter 29
     }
 
     /// Returns a value from the active context and resumes the one underneath it.
