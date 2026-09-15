@@ -158,6 +158,17 @@ impl Interpreter {
         self.ip
     }
 
+    /// Returns the absolute field index in `active_context` of the top of stack.
+    pub fn sp(&self) -> usize {
+        self.sp
+    }
+
+    /// Returns the MethodContext the active context executes in: the active
+    /// context itself, or the home of an active BlockContext.
+    pub fn home_context(&self) -> OOP {
+        self.home_context
+    }
+
     /// Runs the main interpreter loop, repeatedly executing one cycle until
     /// execution terminates.
     //

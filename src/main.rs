@@ -3,6 +3,7 @@ use std::path::PathBuf;
 mod errors;
 mod globalconstants;
 mod image;
+mod inspect;
 mod interpreter;
 mod objectmemory;
 mod oop;

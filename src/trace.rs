@@ -11,6 +11,7 @@ use crate::{
         CLASS_NAME_INDEX, FALSE_POINTER, HEADER_INDEX, LITERAL_START, NIL_POINTER,
         SPECIAL_SELECTORS_ARRAY_POINTER, TRUE_POINTER,
     },
+    inspect::ContextFrame,
     interpreter::Interpreter,
     objectmemory::ObjectMemory,
     oop::OOP,
@@ -218,6 +219,18 @@ pub fn decode(memory: &ObjectMemory, method: OOP, ip: usize) -> Instruction {
     Instruction { text, length }
 }
 
+/// Decodes every bytecode of a method, in order.
+///
+/// # Parameters:
+///     * memory (&ObjectMemory): The memory holding the method
+///     * method (OOP): The CompiledMethod to disassemble
+///
+/// # Returns:
+///     * Vec<(usize, Instruction)>, each bytecode with its byte offset
+pub fn disassemble(memory: &ObjectMemory, method: OOP) -> Vec<(usize, Instruction)> {
+    todo!()
+}
+
 /// Renders an object as something a reader can recognise.
 ///
 /// SmallIntegers, nil, true and false print as themselves; a Symbol or String
@@ -310,6 +323,48 @@ pub fn class_name(memory: &ObjectMemory, class: OOP) -> String {
     }
 }
 
+/// Renders the top of a frame's stack, for the end of a trace line.
+///
+/// The top few values are what an arithmetic or comparison primitive is about
+/// to consume, or has just produced, so they are the difference between seeing
+/// a wrong Boolean at the instruction that made it and forty cycles later at
+/// the jump it misdirected. Rightmost is the top.
+///
+/// # Parameters:
+///     * memory (&ObjectMemory): The memory holding the values
+///     * frame (&ContextFrame): The frame whose stack to render
+///     * depth (usize): How many values to show, from the top down
+///
+/// # Returns:
+///     * String, e.g. `[.. 3, #foo, nil]`, empty brackets for an empty stack
+pub fn stack_top(memory: &ObjectMemory, frame: &ContextFrame, depth: usize) -> String {
+    todo!()
+}
+
+/// Renders one frame as a line of a stack dump.
+///
+/// # Parameters:
+///     * memory (&ObjectMemory): The memory holding the frame's objects
+///     * frame (&ContextFrame): The frame to render
+///
+/// # Returns:
+///     * String, e.g. `0x9a54  SystemDictionary  0x6b64 @143  [temps: 4] [stack: nil, false]`
+pub fn frame_line(memory: &ObjectMemory, frame: &ContextFrame) -> String {
+    todo!()
+}
+
+/// Renders a sender chain, innermost frame first, one frame per line.
+///
+/// # Parameters:
+///     * memory (&ObjectMemory): The memory holding the frames' objects
+///     * frames (&[ContextFrame]): The chain, as `inspect::sender_chain` returns it
+///
+/// # Returns:
+///     * String, lines joined with newlines, no trailing newline
+pub fn chain_dump(memory: &ObjectMemory, frames: &[ContextFrame]) -> String {
+    todo!()
+}
+
 /// Renders one line of trace for the bytecode the interpreter is about to run.
 ///
 /// Reads the interpreter without advancing it, so it can be called before every
@@ -366,7 +421,7 @@ mod tests {
 
         // The image resumes in SystemDictionary>>snapshotAs:thenQuit:, at the
         // send that asks whether the snapshot primitive answered nil. That is
-        // how a resumed image tells itself apart from the one that saved it.
+        // how a resumed image tells itself apart fro  the one that saved it.
         let association = OOP::from_raw(SCHEDULER_ASSOCIATION_POINTER);
         let scheduler = OOP::from_raw(memory.fetch_pointer(VALUE_INDEX, association));
         let process = OOP::from_raw(memory.fetch_pointer(ACTIVE_PROCESS_INDEX, scheduler));
