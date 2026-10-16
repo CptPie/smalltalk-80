@@ -11,4 +11,5 @@
 //! method's source text or the native code a JIT made of it, attach to views
 //! that already exist rather than reshape them.
 
+pub mod server;
 pub mod views;

@@ -193,6 +193,34 @@ pub fn sender_chain(interpreter: &Interpreter) -> Vec<ContextFrame> {
     chain
 }
 
+/// How many contexts the sender chain holds, counting the active one.
+///
+/// Follows the same chain `sender_chain` walks, but only counts: it reads one
+/// word per context instead of unpacking a frame per context. That matters
+/// because the debugger checks the depth after every step when stepping over
+/// or out of a call, where building the frames would be the whole cost of the
+/// loop.
+///
+/// # Parameters:
+///     * interpreter (&Interpreter): The interpreter to read
+///
+/// # Returns:
+///     * usize, the chain's length, at least 1
+pub fn chain_depth(interpreter: &Interpreter) -> usize {
+    let memory = interpreter.memory();
+    let mut cnt: usize = 1;
+
+    let mut sender = memory.fetch_pointer(SENDER_INDEX, interpreter.active_context());
+
+    while sender != NIL_POINTER {
+        cnt += 1;
+        let context = OOP::from_raw(sender);
+        sender = memory.fetch_pointer(SENDER_INDEX, context);
+    }
+
+    cnt
+}
+
 /// Whether a context is a BlockContext.
 ///
 /// The interpreter has this test but keeps it private, and this module is a
@@ -312,6 +340,16 @@ mod tests {
                 "and that one is a MethodContext"
             );
         }
+    }
+
+    #[test]
+    fn the_depth_is_the_length_of_the_chain() {
+        let interpreter = snapshot_interpreter();
+
+        // chain_depth counts what sender_chain builds, one word per context
+        // instead of one frame. Tying the two together here is what keeps the
+        // cheap walk honest about the expensive one.
+        assert_eq!(chain_depth(&interpreter), sender_chain(&interpreter).len());
     }
 
     #[test]

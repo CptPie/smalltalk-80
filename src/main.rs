@@ -23,7 +23,22 @@ use crate::{
 
 fn main() {
     //load_real_image("testBinaries/snapshot.im");
-    run_real_image("testBinaries/snapshot.im", 100);
+    //run_real_image("testBinaries/snapshot.im", 100);
+    serve_real_image("testBinaries/snapshot.im", "127.0.0.1:8080");
+}
+
+/// Boots the interpreter on an image and serves the debugger until killed.
+///
+/// # Parameters:
+///     * path (&str): The image to run, relative to the crate root
+///     * address (&str): What the debugger should bind
+fn serve_real_image(path: &str, address: &str) {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path);
+    let image = Image::load(path).expect("load failed");
+    let memory = Image::parse_into_memory(&image).expect("parse failed");
+
+    println!("debugger on http://{}", address);
+    debugger::server::Debugger::new(Interpreter::from_memory(memory)).serve(address);
 }
 
 /// Boots the interpreter on an image and runs a bounded number of bytecodes,

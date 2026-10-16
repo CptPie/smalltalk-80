@@ -109,23 +109,42 @@ pub struct StateView {
     /// How deep the sender chain is, so a front end can show it changing
     /// without fetching the whole chain every poll.
     pub depth: usize,
+    /// What the last panic said, if the interpreter has hit one.
+    ///
+    /// A paused debugger looks the same whether someone pressed pause or a
+    /// primitive that is not written yet brought the VM down, so this is the
+    /// only thing that tells the two apart. It stays set after the panic,
+    /// describing how the session last stopped rather than anything about the
+    /// current instruction.
+    pub last_panic: Option<String>,
 }
 
 /// Builds the state view.
 ///
+/// The three values the interpreter does not know about are passed in: they
+/// belong to the control loop driving it, not to the virtual machine, which is
+/// the same reason the loop holds the run state rather than `cycle()` doing so.
+///
 /// # Parameters:
 ///     * interpreter (&Interpreter): The interpreter to describe
 ///     * cycle (usize): The control loop's cycle count
-///     * running (bool): The control loop's run state
+///     * running (bool): Whether the loop is stepping of its own accord
+///     * last_panic (Option<String>): What the last caught panic said, if any
 ///
 /// # Returns:
 ///     * StateView
-pub fn state_view(interpreter: &Interpreter, cycle: usize, running: bool) -> StateView {
+pub fn state_view(
+    interpreter: &Interpreter,
+    cycle: usize,
+    running: bool,
+    last_panic: Option<String>,
+) -> StateView {
     StateView {
         cycle,
         running,
         active: frame_view(interpreter.memory(), &active_frame(interpreter)),
         depth: sender_chain(interpreter).len(),
+        last_panic,
     }
 }
 
