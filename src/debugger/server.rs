@@ -461,7 +461,7 @@ fn panic_message(payload: &Box<dyn Any + Send>) -> String {
 ///
 /// Served from `GET /` so that the page and the endpoints it calls share an
 /// origin, which is what spares the whole thing a CORS arrangement.
-const PAGE: &str = include_str!("../../web/index.html");
+const PAGE: &str = include_str!("web/index.html");
 
 #[cfg(test)]
 mod tests {
