@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Smalltalk-80 debugger</title>
+
+    <!--
+      The production global build: defines a `Vue` object, needs no bundler and
+      no module loading, which is the whole reason there is no build step here.
+      Pinned, because an unpinned CDN script is a dependency that changes under
+      you without a commit.
+    -->
+    <script src="https://cdn.jsdelivr.net/npm/vue@3.5.13/dist/vue.global.prod.js"></script>
+
+    <style>
+      :root {
+        --ink: #1c1c1c;
+        --paper: #fbfbf9;
+        --rule: #d8d6cf;
+        --dim: #6a6a66;
+        --alarm: #a3321e;
+      }
+
+      body {
+        margin: 0;
+        padding: 1.5rem;
+        background: var(--paper);
+        color: var(--ink);
+        font:
+          14px/1.5 ui-monospace,
+          "SF Mono",
+          Menlo,
+          Consolas,
+          monospace;
+      }
+
+      h1 {
+        font-size: 1rem;
+        font-weight: 600;
+        margin: 0 0 1rem;
+      }
+
+      .panel {
+        border: 1px solid var(--rule);
+        border-radius: 3px;
+        padding: 0.75rem 1rem;
+        margin-bottom: 1rem;
+        background: #fff;
+      }
+
+      .row {
+        display: flex;
+        gap: 2rem;
+        flex-wrap: wrap;
+      }
+
+      .field {
+        display: flex;
+        flex-direction: column;
+      }
+
+      .label {
+        color: var(--dim);
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+
+      .instruction {
+        font-weight: 600;
+      }
+
+      .stack {
+        list-style: none;
+        margin: 0.25rem 0 0;
+        padding: 0;
+      }
+
+      .stack li {
+        padding: 0.1rem 0;
+      }
+
+      .stack li:last-child::after {
+        content: " ← top";
+        color: var(--dim);
+      }
+
+      .panic {
+        border-color: var(--alarm);
+        color: var(--alarm);
+        white-space: pre-wrap;
+      }
+
+      button {
+        font: inherit;
+        padding: 0.3rem 0.9rem;
+        border: 1px solid var(--rule);
+        border-radius: 3px;
+        background: #fff;
+        cursor: pointer;
+      }
+
+      button:hover {
+        background: #f2f1ec;
+      }
+
+      .dim {
+        color: var(--dim);
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="app">
+      <h1>Smalltalk-80 debugger</h1>
+
+      <div class="panel">
+        <div class="row">
+          <div class="field">
+            <button @click="step">step</button>
+          </div>
+          <div class="field">
+            <button @click="reset">reset</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel panic" v-if="state && state.last_panic">
+        {{ state.last_panic }}
+      </div>
+
+      <div class="panel panic" v-if="error">{{ error }}</div>
+
+      <div class="panel" v-if="state">
+        <div class="row">
+          <div class="field">
+            <span class="label">cycle</span>
+            <span>{{ state.cycle }}</span>
+          </div>
+          <div class="field">
+            <span class="label">running</span>
+            <span>{{ state.running }}</span>
+          </div>
+          <div class="field">
+            <span class="label">depth</span>
+            <span>{{ state.depth }}</span>
+          </div>
+          <div class="field">
+            <span class="label">receiver</span>
+            <span>{{ state.active.receiver.text }}</span>
+          </div>
+        </div>
+        <div class="field" style="margin-top: 0.75rem">
+          <span class="label">next bytecode</span>
+          <span class="instruction">{{ state.active.instruction }}</span>
+        </div>
+      </div>
+
+      <div class="panel" v-if="state">
+        <span class="label">stack</span>
+        <ul class="stack">
+          <li v-for="(value, index) in state.active.stack" :key="index">
+            {{ value.text }}
+          </li>
+        </ul>
+      </div>
+    </div>
+
+    <script>
+      // Everything the page knows comes from /state, which is small enough to
+      // poll. The server is the same origin that served this file, so the
+      // fetches need no host and there is no CORS to arrange.
+      const app = Vue.createApp({
+        data() {
+          return {
+            // The last StateView received, or null before the first one lands.
+            state: null,
+            // What went wrong talking to the server, if anything. Distinct
+            // from state.last_panic, which is the VM breaking rather than the
+            // connection.
+            error: null,
+          };
+        },
+
+        methods: {
+          /// Fetches the current state and stores it.
+          async refresh() {
+            await this.request("/state");
+          },
+
+          /// Asks the loop to run one bytecode.
+          async step() {
+            await this.request("/step", { method: "POST" });
+          },
+
+          async reset() {
+            await this.request("/reset", { method: "POST" });
+          },
+
+          async request(path, options) {
+            try {
+              const response = await fetch(path, options);
+              if (!response.ok)
+                throw new Error(`${response.status} from ${path}`);
+              this.state = await response.json();
+              this.error = null;
+            } catch (error) {
+              this.error = error.message;
+            }
+          },
+        },
+
+        mounted() {
+          this.refresh();
+          setInterval(() => this.refresh(), 200);
+        },
+      });
+
+      app.mount("#app");
+    </script>
+  </body>
+</html>

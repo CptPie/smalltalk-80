@@ -34,11 +34,11 @@ fn main() {
 ///     * address (&str): What the debugger should bind
 fn serve_real_image(path: &str, address: &str) {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path);
-    let image = Image::load(path).expect("load failed");
-    let memory = Image::parse_into_memory(&image).expect("parse failed");
 
     println!("debugger on http://{}", address);
-    debugger::server::Debugger::new(Interpreter::from_memory(memory)).serve(address);
+    debugger::server::Debugger::new(path)
+        .expect("load failed")
+        .serve(address);
 }
 
 /// Boots the interpreter on an image and runs a bounded number of bytecodes,

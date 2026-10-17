@@ -15,15 +15,15 @@ use std::{
     any::Any,
     collections::HashSet,
     panic::{AssertUnwindSafe, catch_unwind},
+    path::PathBuf,
 };
 
 use tiny_http::{Header, Method, Request, Response, Server};
 
 use crate::{
-    debugger::{
-        server::RunState::{Running, Stepping},
-        views::{FrameView, frame_view, method_view, object_view, state_view},
-    },
+    debugger::views::{FrameView, frame_view, method_view, object_view, state_view},
+    errors::ImageLoadError,
+    image::Image,
     inspect::{chain_depth, sender_chain},
     interpreter::Interpreter,
     oop::OOP,
@@ -101,25 +101,42 @@ pub struct Debugger {
     /// leaves the whole sender chain readable, which is the entire reason for
     /// having a debugger before having the primitives.
     last_panic: Option<String>,
+
+    /// Where the image was loaded from.
+    ///
+    /// Kept so that the session can be started over without restarting the
+    /// process: a panic leaves the interpreter inspectable but not resumable,
+    /// so reloading is the only honest way back to a state worth running.
+    image_path: PathBuf,
 }
 
 impl Debugger {
-    /// Builds a session around a booted interpreter, paused before executing its first
+    /// Loads an image and builds a session around it, paused before its first
     /// bytecode.
     ///
+    /// The loading happens here rather than in the caller so that the session
+    /// knows where its image came from, which is what `reset` needs.
+    ///
     /// # Parameters:
-    ///     * interpreter (Interpreter): The interpreter to debug
+    ///     * image_path (PathBuf): The image to debug, as a path this process
+    ///       can open
     ///
     /// # Returns:
-    ///     * Debugger
-    pub fn new(interpreter: Interpreter) -> Self {
-        Debugger {
+    ///     * Result<Debugger, ImageLoadError>, a paused session, or why the
+    ///       image could not be read
+    pub fn new(image_path: PathBuf) -> Result<Self, ImageLoadError> {
+        let image = Image::load(image_path.clone())?;
+        let memory = Image::parse_into_memory(&image)?;
+        let interpreter = Interpreter::from_memory(memory);
+
+        Ok(Debugger {
             interpreter,
             run: RunState::Paused,
             cycle: 0,
             breakpoints: HashSet::new(),
             last_panic: None,
-        }
+            image_path,
+        })
     }
 
     /// Serves requests and runs the interpreter until the process is killed.
@@ -241,6 +258,7 @@ impl Debugger {
     // POST /step?n=1         Stepping(n)
     // POST /run              Running
     // POST /pause            Paused
+    // POST /reset            reload the image, keeping breakpoints
     // POST /until?...        one of the Until variants
     // POST /breakpoint       add or remove a (method, ip)
     fn handle(&mut self, request: Request) {
@@ -293,6 +311,10 @@ impl Debugger {
                 self.run = RunState::Paused;
                 self.respond_state(request);
             }
+            (Method::Post, "/reset") => match self.reset() {
+                Ok(()) => self.respond_state(request),
+                Err(error) => Self::respond_error(request, 500, &format!("{:?}", error)),
+            },
             _ => Self::respond_error(request, 404, "no such route"),
         }
     }
@@ -355,6 +377,26 @@ impl Debugger {
             .expect("a header written by hand is well formed");
         let _ = request.respond(Response::from_string(text).with_header(html));
     }
+
+    /// Starts the session over on a freshly loaded image.
+    ///
+    /// Breakpoints deliberately survive. Reloading the same file produces the
+    /// same object table, so a location set before the reset still names the
+    /// same place, which is what makes setting one and starting over useful.
+    ///
+    /// On failure the session is left untouched, still running the image it
+    /// had: the reload either replaces the interpreter or does nothing.
+    ///
+    /// # Returns:
+    ///     * Result<(), ImageLoadError>, or why the image could not be re-read
+    fn reset(&mut self) -> Result<(), ImageLoadError> {
+        let image = Image::load(self.image_path.clone())?;
+        self.interpreter = Interpreter::from_memory(Image::parse_into_memory(&image)?);
+        self.cycle = 0;
+        self.run = RunState::Paused;
+        self.last_panic = None;
+        Ok(())
+    }
 }
 
 /// Reads an object pointer out of a path like `/object/39508`.
@@ -415,23 +457,21 @@ fn panic_message(payload: &Box<dyn Any + Send>) -> String {
         .unwrap_or_else(|| "a panic carrying no message".to_string())
 }
 
-/// Unused for now: the page will be served from here once it exists.
-#[allow(dead_code)]
-const PAGE: &str = "";
+/// The debugger's page, compiled into the binary.
+///
+/// Served from `GET /` so that the page and the endpoints it calls share an
+/// origin, which is what spares the whole thing a CORS arrangement.
+const PAGE: &str = include_str!("../../web/index.html");
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
-    use crate::image::Image;
-
     use super::*;
 
     fn snapshot_debugger() -> Debugger {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testBinaries/snapshot.im");
-        let image = Image::load(path).expect("load failed");
-        let memory = Image::parse_into_memory(&image).expect("parse failed");
-        Debugger::new(Interpreter::from_memory(memory))
+        Debugger::new(path).expect("load failed")
     }
 
     #[test]
